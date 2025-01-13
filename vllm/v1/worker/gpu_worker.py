@@ -8,7 +8,8 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
+from vllm.distributed import (cleanup_dist_env_and_memory,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
@@ -215,6 +216,9 @@ class Worker:
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
         return
+
+    def shutdown(self):
+        cleanup_dist_env_and_memory()
 
 
 def init_worker_distributed_environment(

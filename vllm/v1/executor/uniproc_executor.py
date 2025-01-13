@@ -1,4 +1,5 @@
 import os
+import weakref
 from typing import Optional, Tuple
 
 from vllm.config import VllmConfig
@@ -27,6 +28,9 @@ class UniprocExecutor(Executor):
         self.observability_config = vllm_config.observability_config
 
         self.worker: Worker = self._create_worker()
+        # Call self.shutdown at exit to clean up
+        # and ensure workers will be terminated.
+        self._finalizer = weakref.finalize(self, shutdown, self.worker)
         self.worker.initialize()
         self.worker.load_model()
 
@@ -76,9 +80,14 @@ class UniprocExecutor(Executor):
         self.worker.profile(is_start)
 
     def shutdown(self):
-        pass
+        self.worker.shutdown()
 
     def check_health(self) -> None:
         # UniprocExecutor will always be healthy as long as
         # it's running.
         return
+
+# Note(rob): shutdown function cannot be a bound method,
+# else the gc cannot collect the object.
+def shutdown(worker: Worker):
+    worker.shutdown()
