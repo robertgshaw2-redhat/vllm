@@ -51,6 +51,7 @@ def test_guided_regex(
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2,
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -86,6 +87,7 @@ def test_guided_json_completion(
             f"that fits this schema: {sample_json_schema}"
         ] * 2,
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -123,6 +125,7 @@ def test_guided_complex_json_completion(
             f"that fits this schema: {sample_complex_json_schema}"
         ] * 2,
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -163,6 +166,7 @@ def test_guided_definition_json_completion(
             f"that fits this schema: {sample_definition_json_schema}"
         ] * 2,
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -203,6 +207,7 @@ def test_guided_enum_json_completion(
             f"{sample_enum_json_schema}. Make it for a high priority critical bug."  # noqa: E501
         ] * 2,
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -248,6 +253,7 @@ def test_guided_choice_completion(
     outputs = llm.generate(
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -282,6 +288,7 @@ def test_guided_grammar(
         prompts=
         "Generate a sql state that select col_1 from table_1 where it is equals to 1",  # noqa: E501
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -318,6 +325,7 @@ def test_guided_options_request_deprecation_warning(
             prompts="This should fail",
             sampling_params=sampling_params,
             guided_options_request=dict(guided_regex=sample_regex),
+            use_tqdm=False,
         )
 
 
@@ -336,6 +344,7 @@ def test_validation_against_both_guided_decoding_options(
             prompts="This should fail",
             sampling_params=sampling_params,
             guided_options_request=dict(guided_regex=sample_regex),
+            use_tqdm=False,
         )
 
 
@@ -356,6 +365,7 @@ def test_guided_json_object(llm: LLM, guided_decoding_backend: str):
         prompts=
         "Generate a JSON object with curly braces for a person with name and age fields for John Smith who is 31 years old.",  # noqa: E501
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
@@ -407,6 +417,7 @@ def test_json_with_any_whitespace_disabled(llm: LLM):
         prompts=
         "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nI want a quick launch fast with $10.<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
         sampling_params=sampling_params,
+        use_tqdm=False,
     )
 
     assert outputs is not None
