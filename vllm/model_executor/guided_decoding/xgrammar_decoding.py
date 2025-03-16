@@ -314,7 +314,7 @@ class XGrammarLogitsProcessor:
         self.reasoner = state['reasoner']
 
         self.tokenizer_info = GrammarConfig.tokenizer_info(
-            TokenizerData(**self.config))
+            self.config.tokenizer_data)
         self.ctx = None
         self.matcher = None
         self.token_bitmask = None  # type: ignore[assignment]
