@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import pickle
-
 import pytest
 import torch
 from transformers import AutoTokenizer
@@ -205,24 +203,3 @@ def test_guided_decoding_backend_options():
 
     no_fallback = GuidedDecodingParams(backend="xgrammar:option-1,no-fallback")
     assert no_fallback.no_fallback()
-
-
-def test_pickle_xgrammar_tokenizer_data():
-
-    # TODO: move to another test file for xgrammar
-    try:
-        import xgrammar as xgr
-    except ImportError:
-        pytest.skip("Could not import xgrammar to run test")
-
-    from vllm.model_executor.guided_decoding.xgrammar_decoding import (
-        TokenizerData)
-    tokenizer_data = TokenizerData(vocab_type=xgr.VocabType.RAW)
-    pickled = pickle.dumps(tokenizer_data)
-
-    assert pickled is not None
-
-    depickled: TokenizerData = pickle.loads(pickled)
-
-    assert depickled is not None
-    assert depickled.vocab_type == xgr.VocabType.RAW

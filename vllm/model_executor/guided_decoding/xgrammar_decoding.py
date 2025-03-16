@@ -297,7 +297,7 @@ class XGrammarLogitsProcessor:
     reasoner: Reasoner | None = None
 
     ctx: xgr.CompiledGrammar | None = None
-    tokenizer_info: xgr.TokenizerInfo | None = None
+    tokenizer_info: xgr.TokenizerInfo = None  # type: ignore[assignment]
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
     matcher: xgr.GrammarMatcher = None  # type: ignore[assignment]
     prefilled: bool = field(default=False)
