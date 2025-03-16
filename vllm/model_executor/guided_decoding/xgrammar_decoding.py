@@ -34,18 +34,15 @@ logger = init_logger(__name__)
 
 
 def get_local_xgrammar_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams,
-    tokenizer: PreTrainedTokenizer,
-    model_config: ModelConfig,
-    reasoner: Reasoner | None,
-    max_threads: int = 8,
-):
-    config = GrammarConfig.from_guided_params(
-        guided_params=guided_params,
-        model_config=model_config,
-        tokenizer=tokenizer,
-        max_threads=max_threads,
-    )
+        guided_params: GuidedDecodingParams,
+        tokenizer: PreTrainedTokenizer,
+        model_config: ModelConfig,
+        reasoner: Reasoner | None,
+        max_threads: int = 8):
+    config = GrammarConfig.from_guided_params(guided_params=guided_params,
+                                              model_config=model_config,
+                                              tokenizer=tokenizer,
+                                              max_threads=max_threads)
     return XGrammarLogitsProcessor(config=config, reasoner=reasoner)
 
 
@@ -75,8 +72,8 @@ class TokenizerDataCache:
             )
             metadata = json.loads(tokenizer_info.dump_metadata())
 
-            # Vendored from xgrammar logic since we cannot pickle the tokenizer
-            # https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98 # noqa: E501
+            # Vendored from xgrammar logic to get encoded_vocab
+            # https://github.com/mlc-ai/xgrammar/blob/989222175c2a30fb7987d8bcce35bec1bf6817f2/python/xgrammar/tokenizer_info.py#L127 # noqa: E501
             try:
                 vocab_dict = tokenizer.get_vocab()
             except AttributeError as e:
@@ -129,9 +126,7 @@ class GrammarCompilerCache:
                 metadata=config_data.metadata,
             )
             cls._cache[cache_key] = xgr.GrammarCompiler(
-                tokenizer_info,
-                max_threads=config.max_threads,
-            )
+                tokenizer_info, max_threads=config.max_threads)
 
         return cls._cache[cache_key]
 
@@ -149,13 +144,11 @@ class GrammarConfig:
     max_threads: int = 8
 
     @classmethod
-    def from_guided_params(
-        cls,
-        guided_params: GuidedDecodingParams,
-        model_config: ModelConfig,
-        tokenizer: PreTrainedTokenizer,
-        max_threads: int = 8,
-    ) -> GrammarConfig:
+    def from_guided_params(cls,
+                           guided_params: GuidedDecodingParams,
+                           model_config: ModelConfig,
+                           tokenizer: PreTrainedTokenizer,
+                           max_threads: int = 8) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
         tokenizer_data = TokenizerDataCache.get_tokenizer_data(
@@ -192,20 +185,16 @@ class GrammarConfig:
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
             try:
-                xgr.Grammar.from_json_schema(
-                    json_str,
-                    any_whitespace=any_whitespace,
-                )
+                xgr.Grammar.from_json_schema(json_str,
+                                             any_whitespace=any_whitespace)
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
-            return cls(
-                json_str=json_str,
-                tokenizer_hash=tokenizer_hash,
-                max_threads=max_threads,
-                tokenizer_data=tokenizer_data,
-                any_whitespace=any_whitespace,
-            )
+            return cls(json_str=json_str,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data,
+                       any_whitespace=any_whitespace)
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -213,8 +202,10 @@ class GrammarConfig:
                     grammar_str = convert_lark_to_gbnf(guided_params.grammar)
                 except ValueError as e:
                     raise ValueError(
-                        f"Failed to convert the grammar from Lark to GBNF. Please either use GBNF grammar directly or specify --guided-decoding-backend=outlines.\nConversion error: {str(e)}"  # noqa: E501
-                    ) from e
+                        "Failed to convert the grammar from Lark to GBNF. "
+                        "Please either use GBNF grammar directly or specify"
+                        " --guided-decoding-backend=outlines.\n"
+                        f"Conversion error: {str(e)}") from e
             else:
                 grammar_str = guided_params.grammar
 
@@ -226,12 +217,10 @@ class GrammarConfig:
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
-            return cls(
-                grammar_str=grammar_str,
-                tokenizer_hash=tokenizer_hash,
-                max_threads=max_threads,
-                tokenizer_data=tokenizer_data,
-            )
+            return cls(grammar_str=grammar_str,
+                       tokenizer_hash=tokenizer_hash,
+                       max_threads=max_threads,
+                       tokenizer_data=tokenizer_data)
         elif guided_params.regex:
             try:
                 xgr.Grammar.from_regex(guided_params.regex)
@@ -321,18 +310,15 @@ class XGrammarLogitsProcessor:
         self.prefilled = False
         """Lazily initialize the processor in the worker process"""
 
-    def __call__(
-        self,
-        input_ids: list[int],
-        scores: torch.Tensor,
-    ) -> torch.Tensor:
+    def __call__(self, input_ids: list[int],
+                 scores: torch.Tensor) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--enable-reasoning` is set.
-        # yapf: disable
-        if self.reasoner is not None and not self.reasoner.is_reasoning_end(input_ids):  # noqa: E501
+        if self.reasoner is not None and \
+        not self.reasoner.is_reasoning_end(
+                input_ids):
             return scores
-        # yapf: enable
 
         if self.ctx is None:
             compiler = GrammarCompilerCache.get_compiler(self.config)
@@ -352,9 +338,7 @@ class XGrammarLogitsProcessor:
             self.matcher = xgr.GrammarMatcher(self.ctx)
         if self.token_bitmask is None:
             self.token_bitmask = xgr.allocate_token_bitmask(
-                1,
-                self.tokenizer_info.vocab_size,
-            )
+                1, self.tokenizer_info.vocab_size)
 
         if not self.prefilled:
             # Have not sampled a token yet
@@ -383,9 +367,7 @@ class XGrammarLogitsProcessor:
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
         xgr.apply_token_bitmask_inplace(
-            scores,
-            self.token_bitmask.to(scores.device, non_blocking=True),
-        )
+            scores, self.token_bitmask.to(scores.device, non_blocking=True))
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 
