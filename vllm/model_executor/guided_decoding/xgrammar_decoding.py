@@ -58,8 +58,9 @@ class TokenizerData:
     # TokenizeInfo with `TokenizerInfo.from_huggingface` while `vocab_type` is
     # used within the constructor of TokenizeInfo
     backend_str: str | None = None
+    vocab_size: int = field(default_factory=lambda: 0)
     vocab_type: xgr.VocabType | None = None
-    prepend_space: bool = False
+    add_prefix_space: bool = False
 
     def __post_init__(self):
         # Check for mutual exclusive
@@ -80,20 +81,27 @@ class TokenizerDataCache:
             # Vendored from xgrammar logic since we cannot pickle the tokenizer
             # https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98 # noqa: E501
             try:
-                encoded_vocab = [
-                    token for token, _ in sorted(tokenizer.get_vocab().items(),
-                                                 key=lambda x: x[1])
-                ]
+                vocab_dict = tokenizer.get_vocab()
             except AttributeError as e:
                 raise ValueError(
-                    f"Cannot get the vocabulary of the tokenizer "
-                    f"{type(tokenizer)}. The tokenizer should have a "
-                    "get_vocab method.") from e
+                    "Cannot get the vocabulary"
+                    f" of the tokenizer {type(tokenizer)}.") from e
+
+            # Some tokenizer don't have token id 0 or 1 or 2.
+            # So the max_id could be larger than the number of tokens.
+            max_id = max(vocab_dict.values())
+            vocab_size = max(len(vocab_dict), max_id + 1)
+
+            # maintain tokenizer's indexing
+            encoded_vocab = [""] * vocab_size
+            for token, idx in vocab_dict.items():
+                if idx < vocab_size:
+                    encoded_vocab[idx] = token
 
             stop_token_ids = None
             backend_str = ""
             vocab_type = xgr.VocabType.RAW
-            prepend_space = False
+            add_prefix_space = False
 
             if stop_token_ids is None and hasattr(
                     tokenizer,
@@ -102,19 +110,33 @@ class TokenizerDataCache:
 
             if isinstance(tokenizer, PreTrainedTokenizerFast):
                 backend_str = tokenizer.backend_tokenizer.to_str()
-                vocab_type = None
+                metadata = xgr.TokenizerInfo._detect_metadata_from_hf(
+                    backend_str)
+                vocab_type = metadata['vocab_type']
+                add_prefix_space = metadata['add_prefix_space']
+            elif xgr_core.TokenizerInfo._is_sentencepiece_tokenizer(tokenizer):
+                if hasattr(tokenizer, "sp_model"):
+                    sp_model = tokenizer.sp_model
+                elif hasattr(tokenizer, "tokenizer") and hasattr(
+                        tokenizer.tokenizer, "sp_model"):
+                    sp_model = tokenizer.tokenizer.sp_model
 
+                if stop_token_ids is None:
+                    eos_id = sp_model.eos_id()
+                    if eos_id != -1:
+                        stop_token_ids = [eos_id]
             elif isinstance(tokenizer, MistralTokenizer):
                 # REF: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
                 vocab_type = xgr.VocabType.BYTE_FALLBACK
-                prepend_space = True
+                add_prefix_space = True
 
             cls._cache[tokenizer_hash] = TokenizerData(
                 encoded_vocab=encoded_vocab,
                 stop_token_ids=stop_token_ids,
                 backend_str=backend_str,
                 vocab_type=vocab_type,
-                prepend_space=prepend_space,
+                vocab_size=vocab_size,
+                add_prefix_space=add_prefix_space,
             )
 
         return cls._cache[tokenizer_hash]
@@ -142,31 +164,17 @@ class GrammarCompilerCache:
             # In TokenizerDataCache.get_tokenizer_data, a serializable
             # tokenizer_data is created and cached. This data is used to build
             # a tokenizer_info and create an xgrammar compiler.
-            # - If tokenizer_data has backend_str set, use
-            # xgr_core.TokenizerInfo.from_huggingface (a C++ bind).
-            # - Otherwise, use the default constructor with vocab_type.
-            # - xgr_core.TokenizerInfo.from_huggingface !=
-            #   xgr.TokenizerInfo.from_huggingface.
-            if config_data.backend_str:
-                metadata = xgr_core.TokenizerInfo._detect_metadata_from_hf(
-                    config_data.backend_str)
-                tokenizer_info = xgr.TokenizerInfo(
-                    encoded_vocab=config_data.encoded_vocab,
-                    vocab_type=metadata['vocab_type'],
-                    vocab_size=config.vocab_size,
-                    stop_token_ids=config_data.stop_token_ids,
-                    add_prefix_space=metadata["add_prefix_space"],
-                )
-            else:
-                tokenizer_info = xgr.TokenizerInfo(
-                    encoded_vocab=config_data.encoded_vocab,
-                    vocab_type=config_data.vocab_type,
-                    vocab_size=config.vocab_size,
-                    stop_token_ids=config_data.stop_token_ids,
-                    add_prefix_space=config_data.prepend_space,
-                )
+            tokenizer_info = xgr.TokenizerInfo(
+                encoded_vocab=config_data.encoded_vocab,
+                vocab_type=config_data.vocab_type,
+                vocab_size=config_data.vocab_size,
+                stop_token_ids=config_data.stop_token_ids,
+                add_prefix_space=config_data.add_prefix_space,
+            )
             cls._cache[cache_key] = xgr.GrammarCompiler(
-                tokenizer_info, max_threads=config.max_threads)
+                tokenizer_info,
+                max_threads=config.max_threads,
+            )
 
         return cls._cache[cache_key]
 
