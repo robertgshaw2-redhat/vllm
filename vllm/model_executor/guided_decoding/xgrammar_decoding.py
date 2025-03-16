@@ -152,7 +152,6 @@ class GrammarCompilerCache:
 class GrammarConfig:
     """Serializable configuration for grammar compilation"""
     tokenizer_hash: int
-    vocab_size: int
     json_str: str | None = None
     grammar_str: str | None = None
     json_object: bool | None = None
@@ -210,7 +209,6 @@ class GrammarConfig:
 
             return cls(
                 json_str=json_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
@@ -238,7 +236,6 @@ class GrammarConfig:
 
             return cls(
                 grammar_str=grammar_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
@@ -246,7 +243,6 @@ class GrammarConfig:
         elif guided_params.json_object:
             return cls(
                 json_object=True,
-                vocab_size=model_config.hf_text_config.vocab_size,
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
@@ -260,7 +256,6 @@ class GrammarConfig:
 
             return cls(
                 grammar_str=choice_str,
-                vocab_size=model_config.hf_text_config.vocab_size,
                 tokenizer_hash=tokenizer_hash,
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
@@ -348,7 +343,9 @@ class XGrammarLogitsProcessor:
                 xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
             ]
             self.token_bitmask = xgr.allocate_token_bitmask(
-                self.batch_size, self.config.vocab_size)
+                self.batch_size,
+                self.config.tokenizer_data.vocab_size,
+            )
 
         if not self.prefilled:
             # Have not sampled a token yet
