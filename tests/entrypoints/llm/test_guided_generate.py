@@ -16,7 +16,9 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-GUIDED_DECODING_BACKENDS = ["outlines", "lm-format-enforcer", "xgrammar"]
+GUIDED_DECODING_BACKENDS = [
+    "outlines", "lm-format-enforcer", "xgrammar:disable-any-whitespace"
+]
 
 
 @pytest.fixture(scope="module")
