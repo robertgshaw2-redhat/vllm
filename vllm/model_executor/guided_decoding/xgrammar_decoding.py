@@ -54,18 +54,9 @@ class TokenizerData:
     """Immutable container for cached tokenizer data."""
     encoded_vocab: list[str] = field(default_factory=list)
     stop_token_ids: list[int] | None = None
-    # These fields are mutually exclusive: `backend_str` is used to create a
-    # TokenizeInfo with `TokenizerInfo.from_huggingface` while `vocab_type` is
-    # used within the constructor of TokenizeInfo
-    backend_str: str | None = None
     vocab_size: int = field(default_factory=lambda: 0)
     vocab_type: xgr.VocabType | None = None
     add_prefix_space: bool = False
-
-    def __post_init__(self):
-        # Check for mutual exclusive
-        assert not (self.backend_str and self.vocab_type), \
-            "backend_str and vocab_type are mutual exclusive"
 
 
 class TokenizerDataCache:
@@ -99,7 +90,6 @@ class TokenizerDataCache:
                     encoded_vocab[idx] = token
 
             stop_token_ids = None
-            backend_str = ""
             vocab_type = xgr.VocabType.RAW
             add_prefix_space = False
 
@@ -109,9 +99,8 @@ class TokenizerDataCache:
                 stop_token_ids = [tokenizer.eos_token_id]
 
             if isinstance(tokenizer, PreTrainedTokenizerFast):
-                backend_str = tokenizer.backend_tokenizer.to_str()
                 metadata = xgr.TokenizerInfo._detect_metadata_from_hf(
-                    backend_str)
+                    tokenizer.backend_tokenizer.to_str())
                 vocab_type = metadata['vocab_type']
                 add_prefix_space = metadata['add_prefix_space']
             elif xgr_core.TokenizerInfo._is_sentencepiece_tokenizer(tokenizer):
@@ -133,7 +122,6 @@ class TokenizerDataCache:
             cls._cache[tokenizer_hash] = TokenizerData(
                 encoded_vocab=encoded_vocab,
                 stop_token_ids=stop_token_ids,
-                backend_str=backend_str,
                 vocab_type=vocab_type,
                 vocab_size=vocab_size,
                 add_prefix_space=add_prefix_space,
