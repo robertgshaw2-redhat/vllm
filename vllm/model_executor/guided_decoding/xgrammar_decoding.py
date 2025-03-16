@@ -46,17 +46,14 @@ def get_local_xgrammar_guided_decoding_logits_processor(
         tokenizer=tokenizer,
         max_threads=max_threads,
     )
-    return XGrammarLogitsProcessor(config, reasoner)
+    return XGrammarLogitsProcessor(config=config, reasoner=reasoner)
 
 
 @dataclass(frozen=True)
 class TokenizerData:
     """Immutable container for cached tokenizer data."""
+    metadata: str
     encoded_vocab: list[str] = field(default_factory=list)
-    stop_token_ids: list[int] | None = None
-    vocab_size: int = field(default_factory=lambda: 0)
-    vocab_type: xgr.VocabType | None = None
-    add_prefix_space: bool = False
 
 
 class TokenizerDataCache:
@@ -64,15 +61,19 @@ class TokenizerDataCache:
     _cache: dict[int, TokenizerData] = {}
 
     @classmethod
-    def get_tokenizer_data(cls,
-                           tokenizer: PreTrainedTokenizer) -> TokenizerData:
+    def get_tokenizer_data(
+        cls,
+        tokenizer: PreTrainedTokenizer,
+        vocab_size: int,
+    ) -> TokenizerData:
         tokenizer_hash = hash(tokenizer)
 
         if tokenizer_hash not in cls._cache:
-            stop_token_ids = None
-            tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
-            add_prefix_space = tokenizer_info.add_prefix_space
-            vocab_type = tokenizer_info.vocab_type
+            tokenizer_info = xgr.TokenizerInfo.from_huggingface(
+                tokenizer,
+                vocab_size=vocab_size,
+            )
+            metadata = json.loads(tokenizer_info.dump_metadata())
 
             # Vendored from xgrammar logic since we cannot pickle the tokenizer
             # https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98 # noqa: E501
@@ -89,23 +90,16 @@ class TokenizerDataCache:
                 if idx < tokenizer_info.vocab_size:
                     encoded_vocab[idx] = token
 
-            if hasattr(
-                    tokenizer,
-                    "eos_token_id",
-            ) and tokenizer.eos_token_id is not None:
-                stop_token_ids = [tokenizer.eos_token_id]
-
             if isinstance(tokenizer, MistralTokenizer):
                 # REF: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
-                vocab_type = xgr.VocabType.BYTE_FALLBACK
-                add_prefix_space = True
+                metadata.update({
+                    "vocab_type": xgr.VocabType.BYTE_FALLBACK,
+                    "add_prefix_space": True
+                })
 
             cls._cache[tokenizer_hash] = TokenizerData(
                 encoded_vocab=encoded_vocab,
-                stop_token_ids=stop_token_ids,
-                vocab_type=vocab_type,
-                vocab_size=tokenizer_info.vocab_size,
-                add_prefix_space=add_prefix_space,
+                metadata=json.dumps(metadata),
             )
 
         return cls._cache[tokenizer_hash]
@@ -125,20 +119,14 @@ class GrammarCompilerCache:
         cache_key = str(config.tokenizer_hash)
 
         if cache_key not in cls._cache:
-            assert config.tokenizer_data is not None
-            assert config.tokenizer_data.encoded_vocab is not None
-
             config_data = config.tokenizer_data
 
             # In TokenizerDataCache.get_tokenizer_data, a serializable
             # tokenizer_data is created and cached. This data is used to build
             # a tokenizer_info and create an xgrammar compiler.
-            tokenizer_info = xgr.TokenizerInfo(
+            tokenizer_info = xgr.TokenizerInfo.from_vocab_and_metadata(
                 encoded_vocab=config_data.encoded_vocab,
-                vocab_type=config_data.vocab_type,
-                vocab_size=config_data.vocab_size,
-                stop_token_ids=config_data.stop_token_ids,
-                add_prefix_space=config_data.add_prefix_space,
+                metadata=config_data.metadata,
             )
             cls._cache[cache_key] = xgr.GrammarCompiler(
                 tokenizer_info,
@@ -152,12 +140,13 @@ class GrammarCompilerCache:
 class GrammarConfig:
     """Serializable configuration for grammar compilation"""
     tokenizer_hash: int
+    tokenizer_data: TokenizerData
     json_str: str | None = None
+    regex_str: str | None = None
     grammar_str: str | None = None
     json_object: bool | None = None
     any_whitespace: bool = True
     max_threads: int = 8
-    tokenizer_data: TokenizerData | None = None
 
     @classmethod
     def from_guided_params(
@@ -169,7 +158,10 @@ class GrammarConfig:
     ) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
-        tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
+        tokenizer_data = TokenizerDataCache.get_tokenizer_data(
+            tokenizer=tokenizer,
+            vocab_size=model_config.hf_text_config.vocab_size,
+        )
 
         if guided_params.json:
             if not isinstance(guided_params.json, str):
@@ -240,6 +232,17 @@ class GrammarConfig:
                 max_threads=max_threads,
                 tokenizer_data=tokenizer_data,
             )
+        elif guided_params.regex:
+            try:
+                xgr.Grammar.from_regex(guided_params.regex)
+            except RuntimeError as err:
+                raise ValueError(str(err)) from err
+            return cls(
+                regex_str=guided_params.regex,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+            )
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -279,6 +282,13 @@ class GrammarConfig:
         grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
         return grammar
 
+    @staticmethod
+    def tokenizer_info(tokenizer_data: TokenizerData) -> xgr.TokenizerInfo:
+        return xgr.TokenizerInfo.from_vocab_and_metadata(
+            encoded_vocab=tokenizer_data.encoded_vocab,
+            metadata=tokenizer_data.metadata,
+        )
+
 
 @dataclass
 class XGrammarLogitsProcessor:
@@ -287,10 +297,14 @@ class XGrammarLogitsProcessor:
     reasoner: Reasoner | None = None
 
     ctx: xgr.CompiledGrammar | None = None
+    tokenizer_info: xgr.TokenizerInfo | None = None
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
-    matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
-    batch_size: int = field(default=1)
+    matcher: xgr.GrammarMatcher = None  # type: ignore[assignment]
     prefilled: bool = field(default=False)
+
+    def __post_init__(self):
+        self.tokenizer_info = self.config.tokenizer_info(
+            self.config.tokenizer_data)
 
     def __getstate__(self) -> dict[str, Any]:
         return {'config': self.config, 'reasoner': self.reasoner}
@@ -299,29 +313,13 @@ class XGrammarLogitsProcessor:
         self.config = state['config']
         self.reasoner = state['reasoner']
 
+        self.tokenizer_info = GrammarConfig.tokenizer_info(
+            TokenizerData(**self.config))
         self.ctx = None
-        self.matchers = []
-        self.batch_size = 1
+        self.matcher = None
         self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
-
-    def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
-        if self.ctx is None:
-            compiler = GrammarCompilerCache.get_compiler(self.config)
-            if self.config.json_str is not None:
-                self.ctx = compiler.compile_json_schema(
-                    self.config.json_str,
-                    any_whitespace=self.config.any_whitespace,
-                )
-            elif self.config.grammar_str is not None:
-                self.ctx = compiler.compile_grammar(self.config.grammar_str)
-            elif self.config.json_object:
-                self.ctx = compiler.compile_builtin_json_grammar()
-            else:
-                raise ValueError(
-                    "Invalid configuration for xgrammar logits processor"
-                )  # noqa: E501
 
     def __call__(
         self,
@@ -331,37 +329,46 @@ class XGrammarLogitsProcessor:
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--enable-reasoning` is set.
-        if self.reasoner is not None and not self.reasoner.is_reasoning_end(
-                input_ids):  # noqa: E501 # yapf: skip
+        # yapf: disable
+        if self.reasoner is not None and not self.reasoner.is_reasoning_end(input_ids):  # noqa: E501
             return scores
+        # yapf: enable
 
         if self.ctx is None:
-            self._ensure_ctx()
+            compiler = GrammarCompilerCache.get_compiler(self.config)
+            if self.config.json_str is not None:
+                self.ctx = compiler.compile_json_schema(
+                    self.config.json_str,
+                    any_whitespace=self.config.any_whitespace,
+                )
+            elif self.config.grammar_str is not None:
+                self.ctx = compiler.compile_grammar(self.config.grammar_str)
+            elif self.config.regex_str is not None:
+                self.ctx = compiler.compile_regex(self.config.regex_str)
+            elif self.config.json_object:
+                self.ctx = compiler.compile_builtin_json_grammar()
 
-        if len(self.matchers) == 0:
-            self.matchers = [
-                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
-            ]
+        if self.matcher is None:
+            self.matcher = xgr.GrammarMatcher(self.ctx)
+        if self.token_bitmask is None:
             self.token_bitmask = xgr.allocate_token_bitmask(
-                self.batch_size,
-                self.config.tokenizer_data.vocab_size,
+                1,
+                self.tokenizer_info.vocab_size,
             )
 
         if not self.prefilled:
             # Have not sampled a token yet
             self.prefilled = True
         else:
-            for i, matcher in enumerate(self.matchers):
-                if not matcher.is_terminated():
-                    sampled_token = input_ids[-1]
-                    assert self.matchers[i].accept_token(sampled_token)
+            if not self.matcher.is_terminated():
+                sampled_token = input_ids[-1]
+                assert self.matcher.accept_token(sampled_token)
 
-        for i, matcher in enumerate(self.matchers):
-            if not matcher.is_terminated():
-                # @ubospica: ideally, fill_next_token_bitmask should be
-                # parallelized with model decoding
-                # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303
-                matcher.fill_next_token_bitmask(self.token_bitmask, i)
+        if not self.matcher.is_terminated():
+            # @ubospica: ideally, fill_next_token_bitmask should be
+            # parallelized with model decoding
+            # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303
+            self.matcher.fill_next_token_bitmask(self.token_bitmask)
 
         # token_bitmask is a CPU tensor for use with accept_token and
         # fill_next_token_bitmask so we move it to the device of scores
@@ -376,7 +383,9 @@ class XGrammarLogitsProcessor:
         # on CPU device fails, but on GPU it runs without error. Hence the
         # unsqueeze above for scores, to match the token bitmask shape
         xgr.apply_token_bitmask_inplace(
-            scores, self.token_bitmask.to(scores.device, non_blocking=True))
+            scores,
+            self.token_bitmask.to(scores.device, non_blocking=True),
+        )
         if device_type != "cuda":
             scores = scores.to(dtype).to(device_type).squeeze()
 
@@ -392,16 +401,12 @@ class XGrammarLogitsProcessor:
 
         # Create fresh matchers for the new sequence
         if self.ctx is not None:
-            new_processor.matchers = [
-                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
-            ]
+            new_processor.matcher = xgr.GrammarMatcher(self.ctx)
 
         # Create a new token bitmask with the same size
         if hasattr(self, 'token_bitmask') and self.token_bitmask is not None:
             new_processor.token_bitmask = self.token_bitmask
 
-        # Copy simple attributes
-        new_processor.batch_size = self.batch_size
         # Reset prefilled state for new sequence
         new_processor.prefilled = False
 

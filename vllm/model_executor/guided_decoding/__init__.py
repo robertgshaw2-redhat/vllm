@@ -26,7 +26,7 @@ def maybe_backend_fallback(
 
     def fallback_or_error(guided_params: GuidedDecodingParams, message: str,
                           fallback: str) -> None:
-        """Change the backend to the specified fallback with a warning log, 
+        """Change the backend to the specified fallback with a warning log,
         or raise a ValueError if the `no-fallback` option is specified."""
         if guided_params.no_fallback():
             raise ValueError(message)
@@ -59,12 +59,6 @@ def maybe_backend_fallback(
             fallback_or_error(guided_params,
                               "xgrammar is only supported on x86 CPUs.",
                               "outlines")
-
-        # xgrammar doesn't support regex, fallback to outlines
-        if guided_params.regex is not None:
-            fallback_or_error(
-                guided_params,
-                "xgrammar does not support regex guided decoding.", "outlines")
 
         # xgrammar doesn't support some JSON schema features
         elif (guided_params.json is not None
