@@ -9,13 +9,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, List
 
 import torch
-from transformers import PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
 
 try:
     import xgrammar as xgr
-    from xgrammar.base import _core as xgr_core
     xgr_installed = True
 except ImportError:
     xgr_installed = False
@@ -35,17 +33,19 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# TODO: passing batch size to max threads here
 def get_local_xgrammar_guided_decoding_logits_processor(
-        guided_params: GuidedDecodingParams,
-        tokenizer: PreTrainedTokenizer,
-        model_config: ModelConfig,
-        reasoner: Reasoner | None,
-        max_threads: int = 8):
-    config = GrammarConfig.from_guided_params(guided_params=guided_params,
-                                              model_config=model_config,
-                                              tokenizer=tokenizer,
-                                              max_threads=max_threads)
+    guided_params: GuidedDecodingParams,
+    tokenizer: PreTrainedTokenizer,
+    model_config: ModelConfig,
+    reasoner: Reasoner | None,
+    max_threads: int = 8,
+):
+    config = GrammarConfig.from_guided_params(
+        guided_params=guided_params,
+        model_config=model_config,
+        tokenizer=tokenizer,
+        max_threads=max_threads,
+    )
     return XGrammarLogitsProcessor(config, reasoner)
 
 
@@ -69,52 +69,33 @@ class TokenizerDataCache:
         tokenizer_hash = hash(tokenizer)
 
         if tokenizer_hash not in cls._cache:
+            stop_token_ids = None
+            tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer)
+            add_prefix_space = tokenizer_info.add_prefix_space
+            vocab_type = tokenizer_info.vocab_type
+
             # Vendored from xgrammar logic since we cannot pickle the tokenizer
             # https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98 # noqa: E501
             try:
                 vocab_dict = tokenizer.get_vocab()
             except AttributeError as e:
                 raise ValueError(
-                    "Cannot get the vocabulary"
-                    f" of the tokenizer {type(tokenizer)}.") from e
-
-            # Some tokenizer don't have token id 0 or 1 or 2.
-            # So the max_id could be larger than the number of tokens.
-            max_id = max(vocab_dict.values())
-            vocab_size = max(len(vocab_dict), max_id + 1)
+                    f"Cannot get the vocabulary of the tokenizer {type(tokenizer)}. The tokenizer should have a get_vocab method."  # noqa: E501
+                ) from e
 
             # maintain tokenizer's indexing
-            encoded_vocab = [""] * vocab_size
+            encoded_vocab = [""] * tokenizer_info.vocab_size
             for token, idx in vocab_dict.items():
-                if idx < vocab_size:
+                if idx < tokenizer_info.vocab_size:
                     encoded_vocab[idx] = token
 
-            stop_token_ids = None
-            vocab_type = xgr.VocabType.RAW
-            add_prefix_space = False
-
-            if stop_token_ids is None and hasattr(
+            if hasattr(
                     tokenizer,
-                    "eos_token_id") and tokenizer.eos_token_id is not None:
+                    "eos_token_id",
+            ) and tokenizer.eos_token_id is not None:
                 stop_token_ids = [tokenizer.eos_token_id]
 
-            if isinstance(tokenizer, PreTrainedTokenizerFast):
-                metadata = xgr.TokenizerInfo._detect_metadata_from_hf(
-                    tokenizer.backend_tokenizer.to_str())
-                vocab_type = metadata['vocab_type']
-                add_prefix_space = metadata['add_prefix_space']
-            elif xgr_core.TokenizerInfo._is_sentencepiece_tokenizer(tokenizer):
-                if hasattr(tokenizer, "sp_model"):
-                    sp_model = tokenizer.sp_model
-                elif hasattr(tokenizer, "tokenizer") and hasattr(
-                        tokenizer.tokenizer, "sp_model"):
-                    sp_model = tokenizer.tokenizer.sp_model
-
-                if stop_token_ids is None:
-                    eos_id = sp_model.eos_id()
-                    if eos_id != -1:
-                        stop_token_ids = [eos_id]
-            elif isinstance(tokenizer, MistralTokenizer):
+            if isinstance(tokenizer, MistralTokenizer):
                 # REF: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
                 vocab_type = xgr.VocabType.BYTE_FALLBACK
                 add_prefix_space = True
@@ -123,7 +104,7 @@ class TokenizerDataCache:
                 encoded_vocab=encoded_vocab,
                 stop_token_ids=stop_token_ids,
                 vocab_type=vocab_type,
-                vocab_size=vocab_size,
+                vocab_size=tokenizer_info.vocab_size,
                 add_prefix_space=add_prefix_space,
             )
 
@@ -180,11 +161,13 @@ class GrammarConfig:
     tokenizer_data: TokenizerData | None = None
 
     @classmethod
-    def from_guided_params(cls,
-                           guided_params: GuidedDecodingParams,
-                           model_config: ModelConfig,
-                           tokenizer: PreTrainedTokenizer,
-                           max_threads: int = 8) -> GrammarConfig:
+    def from_guided_params(
+        cls,
+        guided_params: GuidedDecodingParams,
+        model_config: ModelConfig,
+        tokenizer: PreTrainedTokenizer,
+        max_threads: int = 8,
+    ) -> GrammarConfig:
 
         tokenizer_hash = hash(tokenizer)
         tokenizer_data = TokenizerDataCache.get_tokenizer_data(tokenizer)
@@ -195,8 +178,8 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            any_whitespace = 'disable-any-whitespace' not in \
-                    guided_params.backend_options()
+            backend_options = guided_params.backend_options()
+            any_whitespace = 'disable-any-whitespace' not in backend_options
 
             # Check and log if model with xgrammar and whitespace have history
             # of runaway generation of whitespaces.
@@ -211,26 +194,28 @@ class GrammarConfig:
                 model_with_warn = 'Qwen'
 
             if model_with_warn is not None and any_whitespace:
-                msg = (f"{model_with_warn} "
-                       f"model detected, consider set "
-                       f"`guided_backend=xgrammar:disable-any-whitespace` "
-                       f"to prevent runaway generation of whitespaces.")
-                logger.info_once(msg)
+                logger.info_once(
+                    f"{model_with_warn} model detected, consider set `guided_backend=xgrammar:disable-any-whitespace` to prevent runaway generation of whitespaces."  # noqa: E501
+                )
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
             try:
-                xgr.Grammar.from_json_schema(json_str,
-                                             any_whitespace=any_whitespace)
+                xgr.Grammar.from_json_schema(
+                    json_str,
+                    any_whitespace=any_whitespace,
+                )
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
-            return cls(json_str=json_str,
-                       vocab_size=model_config.hf_text_config.vocab_size,
-                       tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads,
-                       tokenizer_data=tokenizer_data,
-                       any_whitespace=any_whitespace)
+            return cls(
+                json_str=json_str,
+                vocab_size=model_config.hf_text_config.vocab_size,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+                any_whitespace=any_whitespace,
+            )
         elif guided_params.grammar:
             # XGrammar only supports GBNF grammars, so we must convert Lark
             if grammar_is_likely_lark(guided_params.grammar):
@@ -238,10 +223,8 @@ class GrammarConfig:
                     grammar_str = convert_lark_to_gbnf(guided_params.grammar)
                 except ValueError as e:
                     raise ValueError(
-                        "Failed to convert the grammar from Lark to GBNF. "
-                        "Please either use GBNF grammar directly or specify"
-                        " --guided-decoding-backend=outlines.\n"
-                        f"Conversion error: {str(e)}") from e
+                        f"Failed to convert the grammar from Lark to GBNF. Please either use GBNF grammar directly or specify --guided-decoding-backend=outlines.\nConversion error: {str(e)}"  # noqa: E501
+                    ) from e
             else:
                 grammar_str = guided_params.grammar
 
@@ -253,11 +236,13 @@ class GrammarConfig:
             except RuntimeError as err:
                 raise ValueError(str(err)) from err
 
-            return cls(grammar_str=grammar_str,
-                       vocab_size=model_config.hf_text_config.vocab_size,
-                       tokenizer_hash=tokenizer_hash,
-                       max_threads=max_threads,
-                       tokenizer_data=tokenizer_data)
+            return cls(
+                grammar_str=grammar_str,
+                vocab_size=model_config.hf_text_config.vocab_size,
+                tokenizer_hash=tokenizer_hash,
+                max_threads=max_threads,
+                tokenizer_data=tokenizer_data,
+            )
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -330,26 +315,29 @@ class XGrammarLogitsProcessor:
         if self.ctx is None:
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
-                any_whitespace = self.config.any_whitespace
-                self.ctx = compiler\
-                    .compile_json_schema(self.config.json_str,
-                                         any_whitespace=any_whitespace)
+                self.ctx = compiler.compile_json_schema(
+                    self.config.json_str,
+                    any_whitespace=self.config.any_whitespace,
+                )
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.json_object:
                 self.ctx = compiler.compile_builtin_json_grammar()
             else:
                 raise ValueError(
-                    "Invalid configuration for xgrammar logits processor")
+                    "Invalid configuration for xgrammar logits processor"
+                )  # noqa: E501
 
-    def __call__(self, input_ids: list[int],
-                 scores: torch.Tensor) -> torch.Tensor:
+    def __call__(
+        self,
+        input_ids: list[int],
+        scores: torch.Tensor,
+    ) -> torch.Tensor:
 
         # Skip the structured logits processing if reasoning is not finished.
         # reasoner is not None only when `--enable-reasoning` is set.
-        if self.reasoner is not None and \
-        not self.reasoner.is_reasoning_end(
-                input_ids):
+        if self.reasoner is not None and not self.reasoner.is_reasoning_end(
+                input_ids):  # noqa: E501 # yapf: skip
             return scores
 
         if self.ctx is None:
