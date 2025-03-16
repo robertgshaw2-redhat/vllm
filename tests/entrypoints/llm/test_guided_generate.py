@@ -363,9 +363,9 @@ def test_guided_json_object(llm: LLM, guided_decoding_backend: str):
         ),
     )
 
+    prompt = "Generate a JSON object for a person with name and age fields for John Smith who is 31 years old."  # noqa: E501
     outputs = llm.generate(
-        prompts=
-        "Generate a JSON object with curly braces for a person with name and age fields for John Smith who is 31 years old.",  # noqa: E501
+        prompts=prompt,
         sampling_params=sampling_params,
         use_tqdm=False,
     )
@@ -377,7 +377,8 @@ def test_guided_json_object(llm: LLM, guided_decoding_backend: str):
 
         for i in range(2):
             generated_text = output.outputs[i].text
-            print(generated_text)
+
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
             assert generated_text is not None
 
             # Parse to verify it is valid JSON
