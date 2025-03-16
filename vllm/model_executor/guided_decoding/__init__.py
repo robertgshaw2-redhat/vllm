@@ -9,7 +9,6 @@ from vllm.model_executor.guided_decoding.reasoner import get_reasoner
 from vllm.model_executor.guided_decoding.utils import (
     convert_lark_to_gbnf, grammar_is_likely_lark,
     has_lmf_unsupported_json_features, has_xgrammar_unsupported_json_features)
-from vllm.platforms import CpuArchEnum
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -53,16 +52,10 @@ def maybe_backend_fallback(
     if guided_params.backend_name == "xgrammar":
         from vllm.model_executor.guided_decoding.xgrammar_decoding import (
             xgr_installed)
-        # xgrammar only has x86 wheels for linux, fallback to outlines
-        from vllm.platforms import current_platform
-        if current_platform.get_cpu_architecture() is not CpuArchEnum.X86:
-            fallback_or_error(guided_params,
-                              "xgrammar is only supported on x86 CPUs.",
-                              "outlines")
 
         # xgrammar doesn't support some JSON schema features
-        elif (guided_params.json is not None
-              and has_xgrammar_unsupported_json_features(guided_params.json)):
+        if (guided_params.json is not None and
+                has_xgrammar_unsupported_json_features(guided_params.json)):
             fallback_or_error(
                 guided_params,
                 "xgrammar does not support advanced JSON schema features like "

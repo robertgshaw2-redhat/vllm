@@ -403,8 +403,7 @@ def test_json_with_any_whitespace_disabled(llm: LLM):
 
     schema = ResponseSchema.model_json_schema()
     outputs = llm.generate(
-        prompts=
-        "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\nI want a quick launch fast with $10.<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        prompts="I want a quick launch fast with $10",
         sampling_params=SamplingParams(
             max_tokens=2000,
             frequency_penalty=0,
