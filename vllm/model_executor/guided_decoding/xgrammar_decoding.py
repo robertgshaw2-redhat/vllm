@@ -141,7 +141,6 @@ class GrammarConfig:
     tokenizer_hash: int
     tokenizer_data: TokenizerData
     json_str: str | None = None
-    regex_str: str | None = None
     grammar_str: str | None = None
     json_object: bool | None = None
     any_whitespace: bool = True
@@ -227,17 +226,6 @@ class GrammarConfig:
                        tokenizer_hash=tokenizer_hash,
                        max_threads=max_threads,
                        tokenizer_data=tokenizer_data)
-        elif guided_params.regex:
-            try:
-                xgr.Grammar.from_regex(guided_params.regex)
-            except RuntimeError as err:
-                raise ValueError(str(err)) from err
-            return cls(
-                regex_str=guided_params.regex,
-                tokenizer_hash=tokenizer_hash,
-                max_threads=max_threads,
-                tokenizer_data=tokenizer_data,
-            )
         elif guided_params.json_object:
             return cls(
                 json_object=True,
@@ -328,8 +316,6 @@ class XGrammarLogitsProcessor:
                                          any_whitespace=any_whitespace)
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
-            elif self.config.regex_str is not None:
-                self.ctx = compiler.compile_regex(self.config.regex_str)
             elif self.config.json_object:
                 self.ctx = compiler.compile_builtin_json_grammar()
             else:
