@@ -78,8 +78,9 @@ class TokenizerDataCache:
                 vocab_dict = tokenizer.get_vocab()
             except AttributeError as e:
                 raise ValueError(
-                    f"Cannot get the vocabulary of the tokenizer {type(tokenizer)}. The tokenizer should have a get_vocab method."  # noqa: E501
-                ) from e
+                    f"Cannot get the vocabulary of the tokenizer "
+                    f"{type(tokenizer)}. The tokenizer should have a "
+                    "get_vocab method.") from e
 
             # maintain tokenizer's indexing
             encoded_vocab = [""] * tokenizer_info.vocab_size
@@ -178,9 +179,11 @@ class GrammarConfig:
                 model_with_warn = 'Qwen'
 
             if model_with_warn is not None and any_whitespace:
-                logger.info_once(
-                    f"{model_with_warn} model detected, consider set `guided_backend=xgrammar:disable-any-whitespace` to prevent runaway generation of whitespaces."  # noqa: E501
-                )
+                msg = (f"{model_with_warn} "
+                       f"model detected, consider set "
+                       f"`guided_backend=xgrammar:disable-any-whitespace` "
+                       f"to prevent runaway generation of whitespaces.")
+                logger.info_once(msg)
             # Validate the schema and raise ValueError here if it is invalid.
             # This is to avoid exceptions in model execution, which will crash
             # the engine worker process.
