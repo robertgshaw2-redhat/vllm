@@ -291,7 +291,8 @@ class XGrammarLogitsProcessor:
     ctx: xgr.CompiledGrammar | None = None
     tokenizer_info: xgr.TokenizerInfo = None  # type: ignore[assignment]
     token_bitmask: torch.Tensor = None  # type: ignore[assignment]
-    matcher: xgr.GrammarMatcher = None  # type: ignore[assignment]
+    matchers: list[xgr.GrammarMatcher] = field(default_factory=list)
+    batch_size: int = field(default=1)
     prefilled: bool = field(default=False)
 
     def __post_init__(self):
@@ -308,7 +309,8 @@ class XGrammarLogitsProcessor:
         self.tokenizer_info = GrammarConfig.tokenizer_info(
             self.config.tokenizer_data)
         self.ctx = None
-        self.matcher = None
+        self.matchers = []
+        self.batch_size = 1
         self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
 
@@ -344,25 +346,28 @@ class XGrammarLogitsProcessor:
         if self.ctx is None:
             self._ensure_ctx()
 
-        if self.matcher is None:
-            self.matcher = xgr.GrammarMatcher(self.ctx)
-        if self.token_bitmask is None:
+        if len(self.matchers) == 0:
+            self.matchers = [
+                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+            ]
             self.token_bitmask = xgr.allocate_token_bitmask(
-                1, self.tokenizer_info.vocab_size)
+                self.batch_size, self.tokenizer_info.vocab_size)
 
         if not self.prefilled:
             # Have not sampled a token yet
             self.prefilled = True
         else:
-            if not self.matcher.is_terminated():
-                sampled_token = input_ids[-1]
-                assert self.matcher.accept_token(sampled_token)
+            for i, matcher in enumerate(self.matchers):
+                if not matcher.is_terminated():
+                    sampled_token = input_ids[-1]
+                    assert self.matchers[i].accept_token(sampled_token)
 
-        if not self.matcher.is_terminated():
-            # @ubospica: ideally, fill_next_token_bitmask should be
-            # parallelized with model decoding
-            # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303
-            self.matcher.fill_next_token_bitmask(self.token_bitmask)
+        for i, matcher in enumerate(self.matchers):
+            if not matcher.is_terminated():
+                # @ubospica: ideally, fill_next_token_bitmask should be
+                # parallelized with model decoding
+                # See https://github.com/vllm-project/vllm/pull/10785/files#r1864278303
+                matcher.fill_next_token_bitmask(self.token_bitmask, i)
 
         # token_bitmask is a CPU tensor for use with accept_token and
         # fill_next_token_bitmask so we move it to the device of scores
@@ -393,12 +398,16 @@ class XGrammarLogitsProcessor:
 
         # Create fresh matchers for the new sequence
         if self.ctx is not None:
-            new_processor.matcher = xgr.GrammarMatcher(self.ctx)
+            new_processor.matchers = [
+                xgr.GrammarMatcher(self.ctx) for _ in range(self.batch_size)
+            ]
 
         # Create a new token bitmask with the same size
         if hasattr(self, 'token_bitmask') and self.token_bitmask is not None:
             new_processor.token_bitmask = self.token_bitmask
 
+        # Copy simple attributes
+        new_processor.batch_size = self.batch_size
         # Reset prefilled state for new sequence
         new_processor.prefilled = False
 
