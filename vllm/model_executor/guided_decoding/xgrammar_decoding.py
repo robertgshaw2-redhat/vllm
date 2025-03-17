@@ -163,8 +163,8 @@ class GrammarConfig:
             else:
                 json_str = guided_params.json
 
-            backend_options = guided_params.backend_options()
-            any_whitespace = 'disable-any-whitespace' not in backend_options
+            any_whitespace = 'disable-any-whitespace' not in \
+                    guided_params.backend_options()
 
             # Check and log if model with xgrammar and whitespace have history
             # of runaway generation of whitespaces.
@@ -317,10 +317,10 @@ class XGrammarLogitsProcessor:
         if self.ctx is None:
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
-                self.ctx = compiler.compile_json_schema(
-                    self.config.json_str,
-                    any_whitespace=self.config.any_whitespace,
-                )
+                any_whitespace = self.config.any_whitespace
+                self.ctx = compiler\
+                    .compile_json_schema(self.config.json_str,
+                                         any_whitespace=any_whitespace)
             elif self.config.grammar_str is not None:
                 self.ctx = compiler.compile_grammar(self.config.grammar_str)
             elif self.config.regex_str is not None:
