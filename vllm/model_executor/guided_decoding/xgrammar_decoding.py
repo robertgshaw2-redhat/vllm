@@ -311,18 +311,9 @@ class XGrammarLogitsProcessor:
         self.matcher = None
         self.token_bitmask = None  # type: ignore[assignment]
         self.prefilled = False
+
+    def _ensure_ctx(self):
         """Lazily initialize the processor in the worker process"""
-
-    def __call__(self, input_ids: list[int],
-                 scores: torch.Tensor) -> torch.Tensor:
-
-        # Skip the structured logits processing if reasoning is not finished.
-        # reasoner is not None only when `--enable-reasoning` is set.
-        if self.reasoner is not None and \
-        not self.reasoner.is_reasoning_end(
-                input_ids):
-            return scores
-
         if self.ctx is None:
             compiler = GrammarCompilerCache.get_compiler(self.config)
             if self.config.json_str is not None:
@@ -336,6 +327,22 @@ class XGrammarLogitsProcessor:
                 self.ctx = compiler.compile_regex(self.config.regex_str)
             elif self.config.json_object:
                 self.ctx = compiler.compile_builtin_json_grammar()
+            else:
+                raise ValueError(
+                    "Invalid configuration for xgrammar logits processor")
+
+    def __call__(self, input_ids: list[int],
+                 scores: torch.Tensor) -> torch.Tensor:
+
+        # Skip the structured logits processing if reasoning is not finished.
+        # reasoner is not None only when `--enable-reasoning` is set.
+        if self.reasoner is not None and \
+        not self.reasoner.is_reasoning_end(
+                input_ids):
+            return scores
+
+        if self.ctx is None:
+            self._ensure_ctx()
 
         if self.matcher is None:
             self.matcher = xgr.GrammarMatcher(self.ctx)
