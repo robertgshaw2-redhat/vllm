@@ -68,6 +68,9 @@ class TokenizerDataCache:
         if tokenizer_hash not in cls._cache:
             tokenizer_info = xgr.TokenizerInfo.from_huggingface(
                 tokenizer,
+                # NOTE: We will need to use lm_head's vocab_size
+                # to determine correct special_token_ids for this tokenizer.
+                # See https://github.com/mlc-ai/xgrammar/commit/70c959fb6d9cea75aae33c414763cd0602022d92  # noqa: E501
                 vocab_size=vocab_size,
             )
             metadata = json.loads(tokenizer_info.dump_metadata())
