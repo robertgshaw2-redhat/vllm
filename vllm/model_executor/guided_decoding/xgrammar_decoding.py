@@ -43,7 +43,7 @@ def get_local_xgrammar_guided_decoding_logits_processor(
                                               model_config=model_config,
                                               tokenizer=tokenizer,
                                               max_threads=max_threads)
-    return XGrammarLogitsProcessor(config=config, reasoner=reasoner)
+    return XGrammarLogitsProcessor(config, reasoner)
 
 
 @dataclass(frozen=True)
