@@ -98,6 +98,10 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # Requests in states for tracking KV transfers for P/D disagg
+        self.sending_KV_req_ids: set[str] = set()
+        self.waiting_KV_req_ids: set[str] = set()
+
         # OPTIMIZATION: Cache the CachedRequestData objects to avoid creating
         # them at each scheduling step.
         # Request id -> CachedRequestData
@@ -166,6 +170,21 @@ class Scheduler(SchedulerInterface):
 
         # For logging.
         scheduled_timestamp = time.monotonic()
+
+        # Check for new remote decode requests for P/D
+        if self.connector is not None:
+            self.waiting_KV_req_ids.update(
+                self.connector.receive_remote_decode_requests())
+
+            # Check if any P/D requests have finished sending or receiving
+            for req_id in list(self.sending_KV_req_ids):
+                if self.connector.done_sending_remote_decode_request(req_id):
+                    self.sending_KV_req_ids.remove(req_id)
+                    self.finished_req_ids.add(req_id)
+            for req_id in list(self.waiting_KV_req_ids):
+                if self.connector.done_waiting_remote_decode_request(req_id):
+                    self.waiting_KV_req_ids.remove(req_id)
+                    self.waiting.append(self.requests[req_id])
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -479,7 +498,9 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta = self.connector.build_connector_meta(scheduler_output)
+            meta = self.connector.build_connector_meta(scheduler_output,
+                                                       self.sending_KV_req_ids,
+                                                       self.waiting_KV_req_ids)
             scheduler_output.kv_connector_metadata = meta
 
         # Advance the number of computed tokens for the request AFTER
@@ -703,7 +724,21 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+
+            # NOTE: new_token_ids is None if we have a partial prefill.
             if new_token_ids:
+                # If remote_decode, stop the request in the engine and add
+                # it to the sending KVs state. We hold onto this request in the
+                # engine until the sending is done.
+                kv_transfer_params = None
+                if request.do_remote_decode and not stopped:
+                    assert self.connector is not None
+                    stopped = True
+                    request.status = RequestStatus.FINISHED_REMOTE_DECODE
+                    self.sending_KV_req_ids.add(req_id)
+                    kv_transfer_params = self.connector.make_transfer_params(
+                        request=request, remote_decode=True)
+
                 # Add EngineCoreOutput for this Request.
                 outputs.append(
                     EngineCoreOutput(
@@ -713,7 +748,10 @@ class Scheduler(SchedulerInterface):
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         stop_reason=request.stop_reason,
-                        events=request.take_events()))
+                        events=request.take_events(),
+                        kv_transfer_params=kv_transfer_params,
+                    ))
+
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

@@ -26,6 +26,19 @@ class SamplingType(IntEnum):
     RANDOM_SEED = 2
 
 
+# TODO(rob): make this per connector
+class KVTransferParams(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        # required for @cached_property.
+        dict=True):
+    request_id: str
+    remote_instance_id: Optional[str] = None
+    remote_block_ids: Optional[list[int]] = None
+    do_remote_decode: bool = False
+    do_remote_prefill: bool = False
+
+
 # maybe make msgspec?
 @dataclass
 class GuidedDecodingParams:
@@ -237,6 +250,9 @@ class SamplingParams(
     bad_words: Optional[list[str]] = None
     _bad_words_token_ids: Optional[list[list[int]]] = None
 
+    # Fields used for kv cache transfer
+    kv_transfer_params: Optional[KVTransferParams] = None
+
     @staticmethod
     def from_optional(
         n: Optional[int] = 1,
@@ -268,6 +284,7 @@ class SamplingParams(
         guided_decoding: Optional[GuidedDecodingParams] = None,
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
+        kv_transfer_params: Optional[KVTransferParams] = None,
         extra_args: Optional[dict[str, Any]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -310,6 +327,7 @@ class SamplingParams(
             guided_decoding=guided_decoding,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
+            kv_transfer_params=kv_transfer_params,
             extra_args=extra_args,
         )
 

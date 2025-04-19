@@ -17,6 +17,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.sampling_params import KVTransferParams
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -271,9 +272,9 @@ class SharedStorageConnector(KVConnectorBase_V1):
             self._requests_need_load[request.request_id] = request
 
     def build_connector_meta(
-        self,
-        scheduler_output: SchedulerOutput,
-    ) -> KVConnectorMetadata:
+            self, scheduler_output: SchedulerOutput,
+            sending_KV_req_ids: set[str],
+            waiting_KV_req_ids: set[str]) -> KVConnectorMetadata:
         """Build the connector metadata for this step.
 
         This function should NOT modify any fields in the scheduler_output.
@@ -281,6 +282,8 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+            sending_KV_req_ids (set[str]): Request IDs to send
+            waiting_KV_req_ids (set[str]): Request IDs to receive
         """
         meta = SharedStorageConnectorMetadata()
 
@@ -330,6 +333,18 @@ class SharedStorageConnector(KVConnectorBase_V1):
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
         return meta
+
+    def build_transfer_params(self, request: "Request") -> "KVTransferParams":
+        """
+        Build the KVTransferParams for the request.
+        """
+
+        return KVTransferParams(
+            request_id=request.request_id,
+            remote_instance_id=self.instance_id,
+            remote_block_ids=request.block_ids,
+            do_remote_prefill=True,
+        )
 
     # ==============================
     # Helper functions
