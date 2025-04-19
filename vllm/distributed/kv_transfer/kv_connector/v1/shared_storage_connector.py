@@ -17,6 +17,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.sampling_params import KVTransferParams
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -332,6 +333,18 @@ class SharedStorageConnector(KVConnectorBase_V1):
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
         return meta
+
+    def build_transfer_params(self, request: "Request") -> "KVTransferParams":
+        """
+        Build the KVTransferParams for the request.
+        """
+
+        return KVTransferParams(
+            request_id=request.request_id,
+            remote_instance_id=self.remote_instance_id,
+            remote_block_ids=request.block_ids,
+            do_remote_prefill=True,
+        )
 
     # ==============================
     # Helper functions
