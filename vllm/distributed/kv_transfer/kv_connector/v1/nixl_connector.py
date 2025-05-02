@@ -13,7 +13,7 @@ from typing_extensions import Optional
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank, get_tp_group
 from vllm.logger import init_logger
 from vllm.sampling_params import KVTransferParams
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -225,8 +225,8 @@ class NixlConnectorWorker:
         self._remote_agents: dict[str, str] = {}
 
         # Metadata.
-        self.engine_id = engine_id
         self.rank = get_tensor_model_parallel_rank()
+        self.engine_id = engine_id
 
         # KV Caches and nixl tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
@@ -318,7 +318,8 @@ class NixlConnectorWorker:
             )
 
         # Hack for development: create unique port.
-        SIDE_CHANNEL_IP_ADDR = f"tcp://localhost:557{self.rank}"
+        SIDE_CHANNEL_IP_ADDR = f"tcp://localhost:1357{self.rank}"
+        print(f"{NIXL_ROLE} address {SIDE_CHANNEL_IP_ADDR}")
 
         # NOTE(rob): this sends directly from rank i to rank i.
         # If we want to send a single message for discovery, we
@@ -358,7 +359,8 @@ class NixlConnectorWorker:
         else:
             raise Exception("SET NIXL_ROLE to SENDER OR RECVER")
 
-        # NOTE(rob): for debug: Send something.
+        # NOTE(rob): for debug: Send something. With 2 ranks, we send 2 reqs
+        tms_req_id = f"tms_{self.rank}"
         if NIXL_ROLE == "RECVER":
             logger.debug("RECVER Sending blocks")
 
@@ -370,21 +372,21 @@ class NixlConnectorWorker:
                                                range(n_blocks_to_send)),
                                            remote_engine_id=metadata.engine_id)
             connector_metadata.add_new_req(
-                request_id="tms",
+                request_id=tms_req_id,
                 local_block_ids=list(range(n_blocks_to_send)),
                 kv_transfer_params=xfer_params,
             )
             self.start_load_kv(connector_metadata)
 
             # Wait for Receive to complete
-            logger.debug("TMS START RECEIVE XFER")
+            logger.debug(f"TMS START RECEIVE XFER {tms_req_id}")
             done = False
             start_time = time.time()
             while (not done):
-                finished = self.get_finished()
+                _, rcvd = self.get_finished()
                 # NOTE: Should fix discrepancy between bytes/str finished sets
                 # Here we have str. For sender we have bytes.
-                done = "tms" in finished[1]
+                done = tms_req_id in rcvd
                 time.sleep(1e-5)
             end_time = time.time()
             execution_time = end_time - start_time
@@ -394,12 +396,12 @@ class NixlConnectorWorker:
 
         if NIXL_ROLE == "SENDER":
             # Wait for Send to complete
-            logger.debug("TMS START SEND XFER")
+            logger.debug(f"TMS START SEND XFER {tms_req_id}")
             done = False
             start_time = time.time()
             while (not done):
-                finished = self.get_finished()
-                done = "tms" in finished[0]
+                sent, _ = self.get_finished()
+                done = tms_req_id in sent
                 time.sleep(1e-5)
             end_time = time.time()
             execution_time = end_time - start_time
@@ -413,7 +415,7 @@ class NixlConnectorWorker:
                                                 0] = b + 300. + self.rank
                     kv_caches[first_layer_name][1, b, 0, 0,
                                                 0] = b + 400. + self.rank
-
+        print(f"{NIXL_ROLE} TMS DONE TRANSFER")
         for b in range(5):
             print(
                 f"{NIXL_ROLE} KV_CACHE block {b} val {kv_caches[first_layer_name][0, b, 0, 0, 0]}"  #noqa
@@ -474,7 +476,9 @@ class NixlConnectorWorker:
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Get requests that are done sending or recving."""
+        # when tp>1, this needs to check all ranks in current group are done for scheduling 
         done_sending = self._get_new_notifs()
+        # TODO should this function use self._recving_transfers directly?
         done_recving = self._pop_done_transfers(self._recving_transfers)
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -493,6 +497,19 @@ class NixlConnectorWorker:
             for req_id in req_ids:
                 assert req_id not in notified_req_ids
                 notified_req_ids.add(req_id.decode("utf-8"))
+        # Handle TP: driver worker has to gather done_sending from other ranks.
+        tp_group = get_tp_group()
+        if self.rank > 0 and len(notified_req_ids):
+            print(f"\n[{self.rank=}] Sending", notified_req_ids)
+            # TODO do we want to use nixl here and have N handshakes earlier?
+            tp_group.send_object(notified_req_ids, dst=0)
+        elif self.rank == 0:
+            for i in range(1, tp_group.world_size):
+                print(f"\Receiving from TP rank {i}:")
+                rcvd = tp_group.recv_object(src=i)
+                notified_req_ids.union(rcvd)
+                print(f"\nRECEIVED from TP rank {i}:", rcvd)
+
         return notified_req_ids
 
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
