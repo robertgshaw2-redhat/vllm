@@ -509,13 +509,14 @@ class NixlConnectorWorker:
         self,
         local_block_ids: list[int],
         remote_block_ids: list[int],
+        remote_host: str,
+        remote_port: int,
         dst_engine_id: str,
         request_id: str,
     ):
         # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_agents:
-            self._nixl_handshake(envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
-                                 envs.VLLM_NIXL_SIDE_CHANNEL_PORT)
+            self._nixl_handshake(remote_host, remote_port)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).

@@ -486,7 +486,7 @@ class OpenAIServingCompletion(OpenAIServing):
             remote_engine_id = None
             remote_block_ids = None
             remote_host = None
-            remote_post = None
+            remote_port = None
 
         assert len(final_res_batch) == 1
         return CompletionResponse(
