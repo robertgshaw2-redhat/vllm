@@ -47,7 +47,7 @@ class KVTransferParams(
         do_remote_prefill: bool,
         remote_engine_id: Optional[str],
         remote_block_ids: Optional[list[int]],
-        remote_host: Optional[int],
+        remote_host: Optional[str],
         remote_port: Optional[int],
     ) -> Optional["KVTransferParams"]:
         if do_remote_decode and do_remote_prefill:
