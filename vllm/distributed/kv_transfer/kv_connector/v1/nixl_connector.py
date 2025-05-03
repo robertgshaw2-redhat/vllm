@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator
 
 import msgspec
@@ -52,17 +53,13 @@ class NixlAgentMetadata(
     num_blocks: int
 
 
+@dataclass
 class ReqMeta:
-
-    def __init__(
-        self,
-        local_block_ids: list[int],
-        remote_block_ids: list[int],
-        remote_engine_id: str,
-    ):
-        self.local_block_ids = local_block_ids
-        self.remote_block_ids = remote_block_ids
-        self.remote_engine_id = remote_engine_id
+    local_block_ids: list[int]
+    remote_block_ids: list[int]
+    remote_host: str
+    remote_port: int
+    remote_engine_id: str
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -83,7 +80,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params.remote_block_ids,
-            remote_engine_id=kv_transfer_params.remote_engine_id)
+            remote_engine_id=kv_transfer_params.remote_engine_id,
+            remote_host=kv_transfer_params.remote_host,
+            remote_port=kv_transfer_params.remote_port,
+        )
 
 
 class NixlConnector(KVConnectorBase_V1):
@@ -497,10 +497,12 @@ class NixlConnectorWorker:
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
             self._read_blocks(
+                request_id=req_id,
+                dst_engine_id=meta.remote_engine_id,
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
-                dst_engine_id=meta.remote_engine_id,
-                request_id=req_id,
+                remote_host=meta.remote_host,
+                remote_port=meta.remote_port,
             )
 
     def _read_blocks(
