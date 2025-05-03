@@ -112,7 +112,7 @@ async def handle_completions(request: Request):
         remote_block_ids = response_json.get('remote_block_ids', [])
         remote_engine_id = response_json.get('remote_engine_id', '')
         remote_host = response_json.get('remote_host', '')
-        remote_port = response_json.get('remote_host', '')
+        remote_port = response_json.get('remote_port', 0)
 
         # Stream response from decode service
         async def generate_stream():
