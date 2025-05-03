@@ -617,4 +617,5 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
 
         yield socket
     finally:
-        ctx.destroy(linger=0)
+        if ctx is not None:
+            ctx.destroy(linger=0)
