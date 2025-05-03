@@ -288,7 +288,6 @@ class NixlConnectorWorker:
                 if msg != GET_META_MSG:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
-                    pass
                 sock.send_multipart((identity, b"", encoded_data))
 
     def _nixl_handshake(self, host: str, port: int):
