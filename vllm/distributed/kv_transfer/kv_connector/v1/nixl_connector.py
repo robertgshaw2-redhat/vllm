@@ -604,7 +604,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
 
     ctx: Optional[zmq.Context] = None
     try:
-        ctx = zmq.Context()
+        ctx = zmq.Context()  # type: ignore[attr-defined]
 
         if socket_type == zmq.ROUTER:
             socket = ctx.socket(zmq.ROUTER)
