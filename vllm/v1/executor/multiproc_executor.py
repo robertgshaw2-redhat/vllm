@@ -8,6 +8,7 @@ import threading
 import time
 import traceback
 import weakref
+from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -61,6 +62,12 @@ class MultiprocExecutor(Executor):
 
         # Set multiprocessing envs that are common to V0 and V1
         set_multiprocessing_worker_envs(self.parallel_config)
+
+        # Track requests finishing in each worker
+        self._done_sending_count: dict[str, int] = defaultdict(
+            lambda: tensor_parallel_size)
+        self._done_recving_count: dict[str, int] = defaultdict(
+            lambda: tensor_parallel_size)
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -151,7 +158,7 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(
+    def execute_model_non_pdisagg(
         self,
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
@@ -162,6 +169,36 @@ class MultiprocExecutor(Executor):
                                          > 1,
                                          timeout=EXECUTE_MODEL_TIMEOUT_S)
         return output
+
+    def execute_model(
+        self,
+        scheduler_output,
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+        outputs: list[ModelRunnerOutput] = self.collective_rpc(
+            "execute_model",
+            args=(scheduler_output, ),
+            timeout=EXECUTE_MODEL_TIMEOUT_S)
+        rank0_outputs = outputs[0]
+        if len(outputs) == 1:
+            return rank0_outputs
+
+        done_sending, done_recving = set(), set()
+        for output in outputs:
+            for req_id in output.finished_sending or ():
+                if self._done_sending_count[req_id] == 1:
+                    del self._done_sending_count[req_id]
+                    done_sending.add(req_id)
+                else:
+                    self._done_sending_count[req_id] -= 1
+            for req_id in output.finished_recving or ():
+                if self._done_recving_count[req_id] == 1:
+                    del self._done_recving_count[req_id]
+                    done_recving.add(req_id)
+                else:
+                    self._done_recving_count[req_id] -= 1
+        rank0_outputs.finished_recving = done_recving
+        rank0_outputs.finished_sending = done_sending
+        return rank0_outputs
 
     def collective_rpc(self,
                        method: Union[str, Callable],
