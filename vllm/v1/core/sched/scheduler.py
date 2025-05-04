@@ -865,8 +865,7 @@ class Scheduler(SchedulerInterface):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
         for req_id in send_kv_no_op:
-            logger.debug("No op sending Send KV transfer for request %s",
-                         req_id)
+            logger.debug("No op sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
 
         # Return the cached request data to the queue so they can
