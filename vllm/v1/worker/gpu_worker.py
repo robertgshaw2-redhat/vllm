@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """A GPU worker class."""
+import copy
 import gc
 import os
 from typing import TYPE_CHECKING, Optional
@@ -7,6 +8,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 import torch.distributed
 import torch.nn as nn
+from v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -266,7 +268,13 @@ class Worker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        return output if self.is_driver_worker else None
+        if not self.is_driver_worker:
+            # No need to transfer entire output for non-zero ranks.
+            new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            new_output.finished_recving = output.finished_recving
+            new_output.finished_sending = output.finished_recving
+            output = new_output
+        return output
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:

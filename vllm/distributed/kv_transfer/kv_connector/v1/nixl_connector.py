@@ -440,56 +440,7 @@ class NixlConnectorWorker:
                 "Rank %s, get_finished: %s requests done sending "
                 "and %s requests done recving", self.rank, len(done_sending),
                 len(done_recving))
-
-        if self.world_size == 1:
-            return done_sending, done_recving
-
-        # In TP>1 setup, each rank exchanges KVs with its counterpart
-        # ranks independently. get_finished() runs in a worker creates
-        # the done_sending and done_recving sets that are sent to the
-        # scheduler via ModelRunnerOutput by Rank 0. To avoid race
-        # ensure trnxs are done before adding to finished, Ranks 1 to
-        # N-1 communicate to Rank 0 once their transaction is done.
-        # Rank 0 only returns finished once all ranks are complete.
-        if self.rank == 0:
-            for req_id in done_sending:
-                self._done_sending_count[req_id] += 1
-            for req_id in done_recving:
-                self._done_recving_count[req_id] += 1
-
-            # Update the counts of how many ranks have finished.
-            # Get notifies from other ranks that txns are done.
-            other_ranks_finished_ids: list[str] = []
-            for i in range(1, self.world_size):
-                other_ranks_finished_ids.extend(
-                    self.tp_group.recv_object(src=i))
-            for req_id in other_ranks_finished_ids:
-                if (req_id in self._done_recving_count
-                        or req_id in self._recving_transfers):
-                    self._done_recving_count[req_id] += 1
-                else:
-                    self._done_sending_count[req_id] += 1
-
-            # Return ids that have finished on all ranks to the scheduler.
-            all_done_sending: set[str] = set()
-            all_done_recving: set[str] = set()
-            for req_id in list(self._done_recving_count.keys()):
-                if self._done_recving_count[req_id] == self.world_size:
-                    self._done_recving_count.pop(req_id)
-                    all_done_recving.add(req_id)
-            for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
-                    self._done_sending_count.pop(req_id)
-                    all_done_sending.add(req_id)
-
-            return all_done_sending, all_done_recving
-
-        else:
-            finished_req_ids = list(done_recving.union(done_sending))
-            self.tp_group.send_object(finished_req_ids, dst=0)
-
-            # NOTE(rob): unused as only Rank 0 sends to sched.
-            return done_sending, done_recving
+        return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer message."""
