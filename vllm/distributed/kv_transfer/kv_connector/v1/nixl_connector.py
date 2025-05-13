@@ -413,7 +413,8 @@ class NixlConnectorWorker:
 
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
-        self.consumer_notification_counts_by_req = defaultdict(int)
+        self.consumer_notification_counts_by_req: dict[str,
+                                                       int] = defaultdict(int)
 
     @staticmethod
     def _nixl_handshake_listener(metadata: NixlAgentMetadata,
