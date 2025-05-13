@@ -103,6 +103,8 @@ class NixlAgentMetadata(
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
     num_blocks: int
+    tp_size: int
+    block_len: int
 
 
 @dataclass
@@ -356,8 +358,8 @@ class NixlConnectorWorker:
 
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
-        # Map of engine_id -> agent_name.
-        self._remote_agents: dict[str, str] = {}
+        # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
+        self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
 
         # Metadata.
         self.engine_id = engine_id
@@ -380,10 +382,11 @@ class NixlConnectorWorker:
         # xfer layout differently.
         self.src_xfer_side_handle: dict[int, int] = dict()
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[str, int] = {}
+        self.dst_xfer_side_handles: dict[str, int] = dict()
 
-        # Map of engine_id -> num_blocks.
-        self.dst_num_blocks: dict[str, int] = {}
+        # Map of engine_id -> num_blocks. Remote TP ranks will have the same
+        # number of blocks.
+        self.dst_num_blocks: dict[str, int] = dict()
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
@@ -457,7 +460,7 @@ class NixlConnectorWorker:
             got_metadata_time = time.perf_counter()
 
             # Register Remote agent.
-            self.add_remote_agent(metadata)
+            self.add_remote_agent(metadata, rank)
             setup_agent_time = time.perf_counter()
 
             logger.debug("NIXL handshake: get metadata took: %s",
