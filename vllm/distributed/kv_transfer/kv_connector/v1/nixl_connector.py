@@ -773,8 +773,8 @@ class NixlConnectorWorker:
                 req_id, tp_ratio = notif.decode("utf-8").rsplit(":", 1)
                 self.consumer_notification_counts_by_req[req_id] += 1
                 # Wait all consumers (D) to be done reading before freeing.
-                if self.consumer_notification_counts_by_req[
-                        req_id] == tp_ratio:
+                if self.consumer_notification_counts_by_req[req_id] == int(
+                        tp_ratio):
                     notified_req_ids.add(req_id)
                     del self.consumer_notification_counts_by_req[req_id]
         return notified_req_ids
@@ -904,18 +904,20 @@ class NixlConnectorWorker:
     def _get_block_descs_ids(self, engine_id: str,
                              block_ids: list[int]) -> list[int]:
         """Get the descs ids for a set of block ids."""
+        # TODO docs
 
         # range(1) for MLA, range(2) otherwise.
         region_ids = range(self.num_regions)
+        # TODO using a diff num of blocks here in dst and src
         num_blocks = self.dst_num_blocks[engine_id]
 
         # Compute the desc ids for each block.
         descs_ids: list[int] = []
         for reg_id in region_ids:
             for block_id in block_ids:
-                for kv_block in range(self.block_size):
+                for slot_id in range(self.block_size):
                     descs_ids.append(reg_id * num_blocks * self.block_size +
-                                     block_id * self.block_size + kv_block)
+                                     block_id * self.block_size + slot_id)
         return descs_ids
 
 
