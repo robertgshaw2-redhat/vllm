@@ -107,7 +107,9 @@ def test_basic_lifecycle():
 
     # Step (4): Hit EOS.
     scheduler_output = scheduler.schedule()
-    model_runner_output = create_model_runner_output([request], use_eos=True)
+    # model_runner_output = create_model_runner_output([request], use_eos=True)
+    breakpoint()
+    model_runner_output = create_model_runner_output([request], use_eos=False)
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
                                                        model_runner_output)
     scheduler.schedule()
