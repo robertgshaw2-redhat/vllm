@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import nvtx
 import torch
-from lmcache.utils import _lmcache_nvtx_annotate
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
@@ -681,7 +680,6 @@ class CPUConnector(KVConnectorBase_V1):
 
         self._kv_page_shape = kv_caches[list(kv_caches.keys())[0]].shape[2:]
 
-    @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         """
@@ -754,7 +752,6 @@ class CPUConnector(KVConnectorBase_V1):
         # 2. Don't launch all the layers, but just first 2 layers
         # 2.1 launch the rest of the layers during the `wait_for_layer_load`
 
-    @_lmcache_nvtx_annotate
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
         Block until the KV for a specific layer is loaded into vLLM's
@@ -785,7 +782,6 @@ class CPUConnector(KVConnectorBase_V1):
                 self._kv_receiver.free_request(p_req_id)
             self._inflight_h2d_requests.clear()
 
-    @_lmcache_nvtx_annotate
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata", **kwargs) -> None:
         """
@@ -861,7 +857,6 @@ class CPUConnector(KVConnectorBase_V1):
         # 2. use a single cuda event instead of a list of cuda events
         # 3. use a cuda event pool to prevent the creation overhead
 
-    @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """
         Block until all the save operations is done. This is called
