@@ -837,11 +837,13 @@ class NixlConnectorWorker:
         done_req_ids: set[str] = set()
         for req_id, handles in list(transfers.items()):
             for handle, xfer_stime in handles:
+                print("Checking handles")
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
-                    self.nixl_wrapper.release_xfer_handle(handle)
+                    # For now, intentionally ignoring mem leak to test
+                    #self.nixl_wrapper.release_xfer_handle(handle)
                     done_req_ids.add(req_id)
-                    del transfers[req_id]
+                    #del transfers[req_id]
                 elif xfer_state == "PROC":
                     continue
                 else:
@@ -981,6 +983,7 @@ class NixlConnectorWorker:
         start = time.perf_counter()
         self.nixl_wrapper.transfer(handle)
         end = time.perf_counter()
+        print(f"Request ID: {request_id}")
         print(f"self.nixl_wrapper.transfer() TIME: {end-start}")
         if end - start > 0.2:
             print(f"{local_block_ids=}")
