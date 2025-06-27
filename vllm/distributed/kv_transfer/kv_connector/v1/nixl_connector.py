@@ -980,7 +980,6 @@ class NixlConnectorWorker:
         start = time.perf_counter()
         self.nixl_wrapper.transfer(handle)
         end = time.perf_counter()
-        print(f"Request ID: {request_id}")
         print(f"self.nixl_wrapper.transfer() TIME: {end-start}")
         if end - start > 0.2:
             print(f"{local_block_ids=}")
