@@ -839,7 +839,7 @@ class NixlConnectorWorker:
             for handle, xfer_stime in handles:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
-                    #self.nixl_wrapper.release_xfer_handle(handle)
+                    self.nixl_wrapper.release_xfer_handle(handle)
                     del transfers[req_id]
                 elif xfer_state == "PROC":
                     done_req_ids.add(req_id)
