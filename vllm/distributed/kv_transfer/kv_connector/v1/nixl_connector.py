@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
-    from nixl._api import nixl_agent as NixlWrapper
+    from nixl._api import nixl_agent as NixlWrapper, nixl_agent_config
     logger.info("NIXL is available")
 except ImportError:
     logger.warning("NIXL is not available")
@@ -329,7 +329,9 @@ class NixlConnectorWorker:
         self.block_size = vllm_config.cache_config.block_size
 
         # Agent.
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
+        num_workers = 32
+        config = nixl_agent_config(num_threads=num_workers)
+        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
 
