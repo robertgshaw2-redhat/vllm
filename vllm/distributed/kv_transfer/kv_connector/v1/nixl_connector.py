@@ -330,7 +330,7 @@ class NixlConnectorWorker:
 
         # Agent.
         num_workers = 32
-        config = nixl_agent_config(num_threads=num_workers)
+        config = nixl_agent_config(enable_prog_thread=False, num_threads=num_workers)
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[str, dict[int, str]] = defaultdict(dict)
