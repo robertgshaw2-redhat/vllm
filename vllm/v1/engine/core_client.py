@@ -963,6 +963,8 @@ class DPAsyncMPClient(AsyncMPClient):
                     self.engines_running = running
                     # NOTE: counts includes num running for all global
                     # EngineCores, so need to slide for the local ones.
+                    logger.debug(f"{counts[dp_start_rank:dp_end_rank]=} | {counts=} | {dp_start_rank=} {dp_end_rank=}")
+                    
                     self.lb_engines = counts[dp_start_rank:dp_end_rank]
 
         resources.stats_update_task = asyncio.create_task(
