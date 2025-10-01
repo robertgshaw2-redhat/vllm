@@ -1900,7 +1900,7 @@ struct Sm100FmhaMlaKernelTmaWarpspecialized {
       cutlass::arch::NamedBarrier(
           (kNumComputeWarps + kNumLoadWarps) * NumThreadsPerWarp,
           kNamedBarrierEpilogue
-      ).arrive();
+      ).arrive_and_wait();
 
       return;
     }
