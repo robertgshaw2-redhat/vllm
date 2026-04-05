@@ -481,11 +481,10 @@ class Platform:
                     CacheConfig.DEFAULT_BLOCK_SIZE
                 )
             if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
-                logger.info_once(
+                logger.info(
                     "Setting kv cache block size to %d for %s backend.",
                     preferred,
                     backend_cls.get_name(),
-                    scope="local",
                 )
             cache_config.block_size = preferred
 
