@@ -485,6 +485,7 @@ class Platform:
                     "Setting kv cache block size to %d for %s backend.",
                     preferred,
                     backend_cls.get_name(),
+                    scope="local",
                 )
             cache_config.block_size = preferred
 
