@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.profiler.startup import startup_profiler
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -107,7 +108,8 @@ class EngineCore:
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
 
-        load_general_plugins()
+        with startup_profiler.record("load_plugins"):
+            load_general_plugins()
 
         self.vllm_config = vllm_config
         if not vllm_config.parallel_config.data_parallel_rank_local:
@@ -120,7 +122,8 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
-        self.model_executor = executor_class(vllm_config)
+        with startup_profiler.record("init_executor", "spawn workers + load weights"):
+            self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
@@ -236,6 +239,8 @@ class EngineCore:
         # environment variable overrides after this point)
         enable_envs_cache()
 
+        startup_profiler.report("EngineCore")
+
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
@@ -280,7 +285,12 @@ class EngineCore:
             else:
                 # Profiles the peak memory usage of the model to determine how
                 # much memory can be allocated for kv cache.
-                available_gpu_memory = self.model_executor.determine_available_memory()
+                with startup_profiler.record(
+                    "determine_available_memory", "memory profiling"
+                ):
+                    available_gpu_memory = (
+                        self.model_executor.determine_available_memory()
+                    )
                 self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
         else:
             # Attention free models don't need memory for kv cache
@@ -318,7 +328,10 @@ class EngineCore:
         vllm_config.validate_block_size()
 
         # Initialize kv cache and warmup the execution
-        self.model_executor.initialize_from_config(kv_cache_configs)
+        with startup_profiler.record(
+            "initialize_from_config", "kv cache alloc + compile + capture + warmup"
+        ):
+            self.model_executor.initialize_from_config(kv_cache_configs)
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time

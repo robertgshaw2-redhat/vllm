@@ -239,6 +239,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
+    VLLM_STARTUP_PROFILE: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -1749,6 +1750,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_STARTUP_PLAN": lambda: bool(
         int(os.getenv("VLLM_ENABLE_STARTUP_PLAN", "0"))
     ),
+    # If set, record a consolidated breakdown of startup phase timings
+    # (executor bring-up, weight load, memory profiling, torch.compile, CUDA
+    # graph capture, warmup) and log it once startup completes. Off by default;
+    # adds negligible overhead. See vllm/profiler/startup.py.
+    "VLLM_STARTUP_PROFILE": lambda: bool(int(os.getenv("VLLM_STARTUP_PROFILE", "0"))),
     # Valid values are container,code_interpreter,web_search_preview
     # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
     # If the server_label of your mcp tool is not in this list it will
@@ -2085,6 +2091,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         # Runtime memory-plan persistence; does not affect compiled graphs.
         "VLLM_ENABLE_STARTUP_PLAN",
+        # Observational startup timing; does not affect compiled graphs.
+        "VLLM_STARTUP_PROFILE",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",

@@ -84,6 +84,73 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 $ curl -X POST http://localhost:8000/stop_profile
 ```
 
+## Profiling startup time
+
+The profilers above target the steady-state forward pass. To understand where
+time goes **before the server is ready to serve** (weight loading,
+`torch.compile`, CUDA graph capture, warmup), set `VLLM_STARTUP_PROFILE=1`.
+Startup already emits per-phase timing logs (e.g. "Model loading took ...",
+"torch.compile took ...", "Graph capturing finished in ..."), but they are
+scattered across processes and log lines. This flag records those phases in one
+place and logs a single consolidated breakdown once the engine finishes
+starting:
+
+```bash
+VLLM_STARTUP_PROFILE=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
+```
+
+Unlike the trace-based profilers, this is cheap enough to leave on: it only
+wraps existing phase boundaries with wall-clock timers and prints a summary. It
+is off by default and does not change any other log output.
+
+Example breakdown (illustrative numbers — yours depend on model, hardware and
+config):
+
+```text
+vLLM startup profile [EngineCore] - total 41.48s across 4 measured phase(s)
+  load_plugins                          0.12s    0.3%
+  init_executor                        18.42s   44.4%   (spawn workers + load weights)
+  determine_available_memory            3.11s    7.5%   (memory profiling)
+  initialize_from_config               19.83s   47.8%   (kv cache alloc + compile + capture + warmup)
+```
+
+The breakdown is emitted per process (labeled by role, e.g. `EngineCore`), since
+weight loading and compilation happen in worker processes that the engine-core
+process drives synchronously.
+
+### Startup phase breakdown
+
+The table below maps each measured phase to what it covers, its usual dominant
+cost drivers, the finer-grained log lines that already break it down further,
+and the knobs that most affect it. It is meant as a starting point for dividing
+up startup-latency work across the community — pick a phase, measure it on a
+representative model, and drill into the finer logs.
+
+| Phase | What it covers | Dominant cost drivers | Finer-grained signals | Knobs / levers |
+| --- | --- | --- | --- | --- |
+| `load_plugins` | General plugin discovery/import at engine level | Import side effects, entrypoint scanning | — | Number of installed plugins |
+| `init_executor` | Worker process spawn, device init, **model weight loading** | Weight download + deserialization, TP/PP sharding, host↔device copy | "Model loading took ... seconds", "Loading weights took ... seconds", "Time spent downloading weights ... seconds" | `--load-format` (safetensors / `runai_streamer` / `sharded_state`), tensor/pipeline parallel size, disk/network bandwidth, page cache warmth |
+| `determine_available_memory` | Peak-memory profiling forward pass to size the KV cache | One dummy forward at max batch, memory snapshotting | "Available KV cache memory: ... GiB" | `VLLM_ENABLE_STARTUP_PLAN` (persist the plan to skip re-profiling on later boots), `--gpu-memory-utilization` |
+| `initialize_from_config` | KV cache allocation, `torch.compile`, CUDA graph capture, warmup | Inductor compilation, graph capture per batch size | "torch.compile took ... s", "Graph capturing finished in ... secs", "init engine (profile, create kv cache, warmup model) took ..." | Inductor/compile cache reuse, compilation level (`-O`), `cudagraph_capture_sizes`, `--enforce-eager` (skips capture), `VLLM_ENABLE_STARTUP_PLAN` |
+
+### Not yet instrumented
+
+These parts of startup happen outside the engine-core phases above and are good
+candidates for follow-up instrumentation and optimization:
+
+- CLI/config parsing and `VllmConfig` construction.
+- API server bring-up and route/state initialization
+  (`vllm/entrypoints/openai/api_server.py`).
+- Tokenizer/processor construction and any renderer warmup.
+- Per-weight-file and per-graph-size splits within `init_executor` and
+  `initialize_from_config` (the finer log lines above expose these today but
+  they are not aggregated into the breakdown).
+
+If you extend the breakdown, wrap the new boundary with
+`vllm.profiler.startup.startup_profiler.record("phase_name")` and, for a new
+process, call `startup_profiler.report("<role>")` once that process's startup
+completes.
+
 ## Profile with NVIDIA Nsight Systems
 
 Nsight systems is an advanced tool that exposes more profiling details, such as register and shared memory usage, annotated code regions and low-level CUDA APIs and events.
