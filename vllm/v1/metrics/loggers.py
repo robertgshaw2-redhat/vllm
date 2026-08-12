@@ -972,6 +972,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_prefill_kv_computed_request, per_engine_labelvalues
         )
 
+        histogram_num_uncached_tokens_request = self._histogram_cls(
+            name="vllm:request_uncached_tokens",
+            documentation=(
+                "Number of prompt tokens per request that required KV compute "
+                "(prompt tokens not served from local prefix cache or external "
+                "KV transfer)."
+            ),
+            buckets=build_1_2_5_buckets(max_model_len),
+            labelnames=labelnames,
+        )
+        self.histogram_num_uncached_tokens_request = create_metric_per_engine(
+            histogram_num_uncached_tokens_request, per_engine_labelvalues
+        )
+
         #
         # KV Cache residency metrics
         #
@@ -1242,6 +1256,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 finished_request.num_cached_tokens, 0
             )
             self.histogram_prefill_kv_computed_request[engine_idx].observe(
+                prefill_kv_computed
+            )
+            self.histogram_num_uncached_tokens_request[engine_idx].observe(
                 prefill_kv_computed
             )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(

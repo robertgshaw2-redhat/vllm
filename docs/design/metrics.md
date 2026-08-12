@@ -31,6 +31,7 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:generation_tokens_total` (Counter) - Total number of generated tokens.
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
+- `vllm:request_uncached_tokens` (Histogram) - Histogram of prompt tokens per request that required KV compute (not served from cache).
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
 - `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
 - `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency.
