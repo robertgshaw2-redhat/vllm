@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -107,7 +107,7 @@ def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
 def _humming_weight_schema_to_quant_key(
     schema: "HummingWeightSchema",
 ) -> QuantKey:
-    from vllm.utils.humming import WeightScaleType
+    from vllm.utils.humming import WeightScale2Type
 
     """Convert a HummingWeightSchema to a QuantKey."""
     dtype = _HUMMING_TO_QUANT_DTYPE[schema.b_dtype]
@@ -125,7 +125,7 @@ def _humming_weight_schema_to_quant_key(
     scale = ScaleDesc(dtype=scale_dtype, static=True, group_shape=group_shape)
 
     scale2 = None
-    if schema.weight_scale_type == WeightScaleType.GROUP_TENSOR:
+    if schema.weight_scale_2_type == WeightScale2Type.TENSOR:
         scale2 = ScaleDesc(
             dtype=torch.float32,
             static=True,
@@ -304,7 +304,15 @@ def _humming_input_schema_to_quant_key(
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
 
-    scale_dtype = MXFP_SCALE_DTYPE if gs > 0 else torch.float32
+    # Grouped 4-bit activations use mx-style e8m0 scales; grouped 8-bit
+    # activations (fp8/int8 block quantization) use fp32 scales, matching
+    # the kernel's as_dtype resolution outside the mxmma path.
+    if gs > 0 and schema.input_scale_dtype is not None:
+        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.input_scale_dtype]
+    elif gs > 0 and schema.a_dtype.num_bits == 4:
+        scale_dtype = MXFP_SCALE_DTYPE
+    else:
+        scale_dtype = torch.float32
 
     scale = ScaleDesc(dtype=scale_dtype, static=False, group_shape=group_shape)
 
@@ -380,6 +388,49 @@ def input_schema_to_quant_key(
         return _compressed_tensors_input_schema_to_quant_key(schema)
 
     raise TypeError(f"Unsupported input schema type: {type(schema)}")
+
+
+def maybe_regroup_weight_schema_for_quantized_input(
+    weight_schema: Any,
+    input_schema: Any,
+) -> "HummingWeightSchema | None":
+    """Return a requant target schema when the weight scale groups are too
+    small for the requested activation quantization, else None.
+
+    The humming GEMM requires weight scale groups to span at least one MMA
+    K-tile (256 // activation_bits elements). NVFP4 checkpoints carry
+    group-16 FP8 weight scales, which only 16-bit (and, on Blackwell, 4-bit)
+    activations can consume directly; 8-bit activations (fp8 per-token,
+    fp8-block, int8) need the weights requantized to group-32 scales.
+    """
+    from vllm.utils.humming import HummingInputSchema, HummingWeightSchema
+
+    if not isinstance(weight_schema, HummingWeightSchema):
+        return None
+    if not isinstance(input_schema, HummingInputSchema):
+        return None
+
+    a_dtype = input_schema.a_dtype
+    if a_dtype is None or a_dtype.num_bits != 8:
+        return None
+
+    group_size = weight_schema.weight_scale_group_size
+    min_group_size = 256 // a_dtype.num_bits
+    if group_size <= 0 or group_size >= min_group_size:
+        return None
+    if weight_schema.weight_scale_group_size_n > 1:
+        return None
+
+    logger.warning_once(
+        "Humming: weight scale group size %d is below the minimum of %d "
+        "required for %s activations; requantizing weights to group-%d "
+        "scales (numerics differ slightly from the checkpoint).",
+        group_size,
+        min_group_size,
+        str(a_dtype),
+        min_group_size,
+    )
+    return replace(weight_schema, weight_scale_group_size=min_group_size)
 
 
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
@@ -458,10 +509,16 @@ def prepare_humming_linear_layer_config(
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
-    if input_quant_config is not None:
-        input_schema = BaseInputSchema.from_config(input_quant_config)
+    if input_quant_config is None:
+        # Honor the humming activation quantization override (same semantics
+        # as the MoE path) for kernels that don't pass an explicit config.
+        env_input_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
+        if not humming_is_layer_skipped(env_input_config, layer.prefix):
+            input_schema = HummingInputSchema.from_config(env_input_config)
+        else:
+            input_schema = HummingInputSchema()
     else:
-        input_schema = HummingInputSchema()
+        input_schema = BaseInputSchema.from_config(input_quant_config)
 
     # ReplicatedLinear has no TP partitioning and so does not set
     # input_size_per_partition; for it that is just input_size. Use hasattr
@@ -487,6 +544,22 @@ def prepare_humming_linear_layer_config(
         shape_k_stacks=shape_k_stacks,
         param_dtype=layer.params_dtype,
     )
+
+    # Regroup weight scales that are too small for the requested activation
+    # quantization (e.g. NVFP4 group-16 with fp8 activations).
+    regroup_schema = maybe_regroup_weight_schema_for_quantized_input(
+        weight_schema, input_schema
+    )
+    if regroup_schema is not None:
+        bias = tensors.get("bias")
+        tensors = weight_schema.requant_tensors(
+            tensors=tensors,
+            target_weight_schema=regroup_schema,
+            param_dtype=layer.params_dtype,
+        )
+        if bias is not None:
+            tensors["bias"] = bias
+        weight_schema = regroup_schema
 
     layer.weight_schema = weight_schema
 
@@ -930,8 +1003,14 @@ def _process_single_sublayer(
         param_dtype=param_dtype,
     )
 
-    # Step 2: Force requant if needed
+    # Step 2: Force requant if needed. Absent an explicit target, weights
+    # whose scale groups are too small for the requested activation
+    # quantization (e.g. NVFP4 group-16 with fp8 activations) are regrouped.
     assert isinstance(current_weight_schema, HummingWeightSchema)
+    if force_weight_schema is None:
+        force_weight_schema = maybe_regroup_weight_schema_for_quantized_input(
+            current_weight_schema, current_input_schema
+        )
     if force_weight_schema is not None and current_weight_schema != force_weight_schema:
         tensors = _extract_sublayer_tensors(layer, sublayer_name)
 

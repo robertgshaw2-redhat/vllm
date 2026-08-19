@@ -238,6 +238,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             (kMxfp4Static, kFp8DynamicTokenSym),
             (kNvfp4Static, None),
             (kNvfp4Static, kFp8DynamicTokenSym),
+            (kNvfp4Static, kFp8Dynamic128Sym),
             (kMxfp8Static, None),
             (kMxfp8Static, kFp8DynamicTokenSym),
             (kFp8StaticChannelSym, None),

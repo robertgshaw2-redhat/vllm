@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.humming_utils import (
     get_humming_moe_quant_config,
     input_schema_to_quant_key,
     make_humming_moe_kernel,
+    maybe_regroup_weight_schema_for_quantized_input,
     select_humming_moe_experts,
     weight_schema_to_quant_key,
 )
@@ -528,15 +529,25 @@ class HummingLinearMethod(LinearMethodBase):
 
         # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
         assert isinstance(self.weight_schema, _hm.HummingWeightSchema)
-        force_requant = self.force_weight_schema is not None
-        if force_requant and self.weight_schema != self.force_weight_schema:
+        force_weight_schema = self.force_weight_schema
+        if force_weight_schema is None:
+            # Regroup weight scales that are too small for the requested
+            # activation quantization (e.g. NVFP4 group-16 with fp8
+            # activations).
+            force_weight_schema = maybe_regroup_weight_schema_for_quantized_input(
+                self.weight_schema, self.input_schema
+            )
+        if (
+            force_weight_schema is not None
+            and self.weight_schema != force_weight_schema
+        ):
             tensors = self.weight_schema.requant_tensors(
                 tensors=layer.state_dict(),
-                target_weight_schema=self.force_weight_schema,
+                target_weight_schema=force_weight_schema,
                 param_dtype=layer.param_dtype,
             )
 
-            self.weight_schema = self.force_weight_schema
+            self.weight_schema = force_weight_schema
 
             for name, _ in list(layer.named_parameters()):
                 if name != "bias":
