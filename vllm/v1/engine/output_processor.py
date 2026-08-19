@@ -151,6 +151,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        remote_cached_tokens: int | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -175,6 +176,11 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        # P/D: cached-token count reported by the remote prefill instance via
+        # kv_transfer_params. When set, it replaces the local count in request
+        # outputs, where local prefix-cache hits are inflated by the KV
+        # transfer itself. Local metrics keep using `num_cached_tokens`.
+        self.remote_cached_tokens = remote_cached_tokens
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -223,7 +229,14 @@ class RequestState:
         log_stats: bool,
         stream_interval: int,
     ) -> "RequestState":
+        remote_cached_tokens = None
         if sampling_params := request.sampling_params:
+            if sampling_params.extra_args:
+                kv_params = sampling_params.extra_args.get("kv_transfer_params")
+                if isinstance(kv_params, dict) and kv_params.get("do_remote_prefill"):
+                    num_cached = kv_params.get("remote_num_cached_tokens")
+                    if isinstance(num_cached, int) and num_cached >= 0:
+                        remote_cached_tokens = num_cached
             if not sampling_params.detokenize:
                 tokenizer = None
             output_kind = sampling_params.output_kind
@@ -274,6 +287,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            remote_cached_tokens=remote_cached_tokens,
         )
 
     def make_request_output(
@@ -383,7 +397,11 @@ class RequestState:
             finished=finished,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
-            num_cached_tokens=self.num_cached_tokens,
+            num_cached_tokens=(
+                self.remote_cached_tokens
+                if self.remote_cached_tokens is not None
+                else self.num_cached_tokens
+            ),
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
         )

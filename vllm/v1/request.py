@@ -203,6 +203,12 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
+        # Prompt tokens served from cache (local prefix cache + external KV
+        # transfer) at first scheduling. Unlike `prefill_stats`, this survives
+        # `take_prefill_stats()` so KV connectors can report it (e.g. to a
+        # P/D router) when the request finishes.
+        self.num_cached_tokens = 0
+
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents

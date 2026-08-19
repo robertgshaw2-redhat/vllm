@@ -141,6 +141,62 @@ def test_incremental_detokenization(
     assert not output_processor.has_unfinished_requests()
 
 
+def test_remote_prefill_cached_tokens_override():
+    """P/D disaggregation: a `remote_num_cached_tokens` count forwarded by the
+    prefill instance via `kv_transfer_params` replaces the decode-local
+    cached-token count in request outputs, which is inflated by the KV
+    transfer itself. Requests without it keep the local count."""
+    remote_cached_tokens = 7
+    output_processor = OutputProcessor(tokenizer=None, log_stats=False)
+
+    prompt_tokens = [[1, 2, 3, 4], [5, 6, 7, 8]]
+    generation_tokens = [[11, 12], [13, 14]]
+    extra_args_per_req: list[dict | None] = [
+        {
+            "kv_transfer_params": {
+                "do_remote_prefill": True,
+                "remote_num_cached_tokens": remote_cached_tokens,
+            }
+        },
+        None,
+    ]
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}-int",
+            external_req_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens[idx],
+            mm_features=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(detokenize=False, extra_args=extra_args),
+            pooling_params=None,
+        )
+        for idx, extra_args in enumerate(extra_args_per_req)
+    ]
+
+    engine_core = MockEngineCore(
+        tokens_list=generation_tokens,
+        prompts_list=prompt_tokens,
+        request_ids=[req.request_id for req in requests],
+    )
+
+    for request in requests:
+        output_processor.add_request(request, prompt=None)
+
+    num_cached_per_req: dict[str, int | None] = {}
+    while outputs := engine_core.get_outputs():
+        for request_output in output_processor.process_outputs(outputs).request_outputs:
+            num_cached_per_req[request_output.request_id] = (
+                request_output.num_cached_tokens
+            )
+
+    # MockEngineCore reports 0 locally cached tokens via prefill_stats.
+    assert num_cached_per_req["request-0"] == remote_cached_tokens
+    assert num_cached_per_req["request-1"] == 0
+
+
 def test_request_stream_interval_raises_but_not_below_engine_default(
     dummy_test_vectors,
 ):

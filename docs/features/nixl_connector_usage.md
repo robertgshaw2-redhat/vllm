@@ -132,6 +132,12 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+## Accurate Cached-Token Usage Reporting
+
+With `--enable-prompt-tokens-details`, vLLM reports `prompt_tokens_details.cached_tokens` in OpenAI responses. On a decoder, the local count is inflated: prompt tokens transferred from the prefiller count as cache hits, so responses report (nearly) the whole prompt as cached.
+
+To report accurate usage, the prefiller returns its own cached-token count as `remote_num_cached_tokens` in the response's `kv_transfer_params`. When a proxy/router forwards these params in the request to the decoder (as with `remote_block_ids` etc.), the decoder reports that count as `cached_tokens` instead of its local one, so downstream systems (e.g. billing) see the tokens that actually hit the prefix cache. Local Prometheus metrics on the decoder are unaffected.
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.

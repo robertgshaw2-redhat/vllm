@@ -292,6 +292,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            remote_num_cached_tokens=request.num_cached_tokens,
             transfer_mode=self._TRANSFER_MODE,
         )
 

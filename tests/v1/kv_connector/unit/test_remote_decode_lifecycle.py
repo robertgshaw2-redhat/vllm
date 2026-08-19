@@ -61,6 +61,7 @@ def test_basic_lifecycle():
     output = engine_core_outputs[0].outputs[0]
     assert output.finish_reason == FinishReason.LENGTH
     assert output.kv_transfer_params is not None
+    assert output.kv_transfer_params["remote_num_cached_tokens"] == 0
 
     # Request freed in Scheduler and in Persistent Batch ...
     assert request_id in scheduler.finished_req_ids
@@ -211,6 +212,13 @@ def test_prefix_cache_lifecycle():
     # remote_block_ids is BlockIds (tuple of lists); sum block counts across groups.
     num_remote_blocks = sum(len(g) for g in kv_transfer_params["remote_block_ids"])
     assert num_remote_blocks == (NUM_EXTERNAL_FULL_BLOCKS + 1)
+
+    # P reports its local cached-token count so D can report accurate
+    # cached-token usage instead of its inflated local count.
+    assert (
+        kv_transfer_params["remote_num_cached_tokens"]
+        == NUM_EXTERNAL_FULL_BLOCKS * BLOCK_SIZE
+    )
 
     # STEP (2): Ensure it is freed.
     scheduler_output = scheduler.schedule()

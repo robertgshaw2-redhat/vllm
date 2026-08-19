@@ -276,6 +276,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            remote_num_cached_tokens=request.num_cached_tokens,
             remote_blocks_expiry_time=blocks_expiry_time,
             transfer_mode=self._TRANSFER_MODE,
         )
