@@ -31,6 +31,7 @@ def compute_aligned_M_and_alignment(
     local_num_experts: int,
     alignment: int,
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    for_workspace_sizing: bool = False,
 ) -> tuple[int, int]:
     """Return (M_sum, alignment_used).
 
@@ -43,7 +44,24 @@ def compute_aligned_M_and_alignment(
     Prefer this over the int-returning :func:`compute_aligned_M` when the
     GEMM call site needs to wrap itself in ``mk_alignment_scope`` or
     otherwise reason about the actual per-expert padding.
+
+    `for_workspace_sizing` handles the DeepEP v2 no-expand carrier
+    (psum_recv_per_rank set): that layer replays inside CUDA graphs
+    without counts while eager invocations of it carry exact counts, and
+    workspaces are growth-locked shared state that cannot grow during
+    capture. Sizing then ignores the counts and keeps the full `alignment`
+    (no per-call shrink), which dominates both the counts-free capture
+    pass and any exact-count eager pass.
     """
+    allow_alignment_shrink = True
+    if (
+        for_workspace_sizing
+        and expert_tokens_meta is not None
+        and expert_tokens_meta.psum_recv_per_rank is not None
+    ):
+        expert_tokens_meta = None
+        allow_alignment_shrink = False
+
     if (expert_tokens_meta is not None) and (
         expert_tokens_meta.expert_num_tokens_cpu is not None
     ):
@@ -60,22 +78,23 @@ def compute_aligned_M_and_alignment(
     # Also shrink `alignment` to DeepGEMM's per-call theoretical BLOCK_M on
     # SM100/SM120 when smaller.
     expected_m = M * num_topk
-    try:
-        from vllm.utils.deep_gemm import (
-            get_theoretical_mk_alignment_for_contiguous_layout,
-        )
+    if allow_alignment_shrink:
+        try:
+            from vllm.utils.deep_gemm import (
+                get_theoretical_mk_alignment_for_contiguous_layout,
+            )
 
-        # num_groups=local_num_experts so the helper recovers per-expert em;
-        # omitting it over-picks BLOCK_M on SM120 (heuristic assumes em is
-        # already per-expert).
-        per_call_align = get_theoretical_mk_alignment_for_contiguous_layout(
-            expected_m=expected_m,
-            num_groups=local_num_experts,
-        )
-        if per_call_align and per_call_align <= alignment:
-            alignment = per_call_align
-    except Exception:
-        pass
+            # num_groups=local_num_experts so the helper recovers per-expert
+            # em; omitting it over-picks BLOCK_M on SM120 (heuristic assumes
+            # em is already per-expert).
+            per_call_align = get_theoretical_mk_alignment_for_contiguous_layout(
+                expected_m=expected_m,
+                num_groups=local_num_experts,
+            )
+            if per_call_align and per_call_align <= alignment:
+                alignment = per_call_align
+        except Exception:
+            pass
 
     max_active_experts = min(M * num_topk, local_num_experts)
     M_sum = (M * num_topk) + max_active_experts * (alignment - 1)

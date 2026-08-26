@@ -27,12 +27,16 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     Supports two modes controlled by the `use_cudagraph` constructor arg:
 
     **Decode mode (use_cudagraph=True):**
-      - do_expand=False, do_cpu_sync=False
+      - do_expand=False; do_cpu_sync=False only while a CUDA graph is
+        actually being captured, True on eager invocations
       - Tokens returned in original order with recv_topk_idx (global IDs)
       - Worst-case tensor allocation; padding rows zeroed via
         handle.psum_num_recv_tokens_per_scaleup_rank
       - Fully cudagraph-capturable
-      - Expert kernel sorts internally (expert_tokens_meta carries no counts)
+      - Expert kernel sorts internally. Eager invocations carry exact
+        per-expert counts in expert_tokens_meta so count-based experts
+        (e.g. DeepGEMM) size their compute exactly instead of processing
+        the worst-case padded buffer; captured invocations carry no counts
 
     **Prefill mode (use_cudagraph=False):**
       - do_expand=True, do_cpu_sync=True
@@ -127,10 +131,19 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if has_scales:
             token_data = (tokens, token_scales)
 
-        # Decode: do_expand=False + do_cpu_sync=False (cudagraph-safe)
-        # Prefill: do_expand=True + do_cpu_sync=True (memory-efficient)
+        # Decode: do_expand=False (worst-case layout, cudagraph-safe)
+        # Prefill: do_expand=True (memory-efficient, exact allocation)
         do_expand = not self.use_cudagraph
-        do_cpu_sync = not self.use_cudagraph
+
+        # The CPU sync must be skipped only while the dispatch is actually
+        # being captured into a CUDA graph. Every eager invocation of the
+        # no-expand path (prefill, capture warmups, uncaptured decode sizes)
+        # syncs so the receiver can hand exact per-expert counts to the
+        # expert kernels. Without counts, DeepGEMM pads its grouped GEMM to
+        # the worst-case buffer size, and on SM90 even the "skipped"
+        # m_indices==-1 blocks are streamed through TMA — a worst-case GEMM
+        # (~10x slower than the exactly-sized one) on every step.
+        do_cpu_sync = do_expand or not torch.cuda.is_current_stream_capturing()
 
         # In do_expand=False mode, the recv buffer is the worst case
         # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
@@ -216,9 +229,9 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 device=expert_x.device,
             )
         else:
-            # Decode/cudagraph path (do_cpu_sync=False) skips the CPU sync and
+            # Graph-capture path (do_cpu_sync=False) skips the CPU sync and
             # leaves recv_expert_num_tokens empty. A present-but-empty
-            # ExpertTokensMetadata violates the decode-mode contract above
+            # ExpertTokensMetadata violates the no-counts contract above
             # (expert_tokens_meta must be None) and crashes DeepEP combine
             # during profile_run when CUDA graphs are enabled.
             expert_tokens_meta = None
@@ -268,9 +281,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         if self.use_cudagraph:
             # Carry the per-rank prefix sum so SiTU can skip padding rows.
-            # expert_num_tokens stays None: count-based consumers (DeepGEMM,
-            # Triton) must treat a None field as "no counts" and derive their
-            # own, exactly as in the meta-absent decode case.
+            # Counts are present on eager (cpu-synced) invocations and absent
+            # under graph capture; count-based consumers (DeepGEMM, Triton)
+            # must treat a None expert_num_tokens as "no counts" and derive
+            # their own, exactly as in the meta-absent case. Consumers that
+            # size CUDA-graph-shared state (workspaces) off the counts must
+            # size for the counts-free capture case instead whenever
+            # psum_recv_per_rank is set — the same layer will replay with
+            # worst-case shapes.
             if expert_tokens_meta is None:
                 expert_tokens_meta = mk.ExpertTokensMetadata(
                     expert_num_tokens=None,

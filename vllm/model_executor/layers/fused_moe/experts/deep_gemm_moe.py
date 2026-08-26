@@ -212,7 +212,12 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         # is the quant block (1 for MXFP8) and would under-size the workspace.
         block_m = get_mk_alignment_for_contiguous_layout()[0]
         M_sum, align_used = compute_aligned_M_and_alignment(
-            M, topk, local_num_experts, block_m, expert_tokens_meta
+            M,
+            topk,
+            local_num_experts,
+            block_m,
+            expert_tokens_meta,
+            for_workspace_sizing=True,
         )
         assert M_sum % align_used == 0
 
@@ -476,7 +481,12 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         block_m = get_mk_alignment_for_contiguous_layout()[0]
         M_sum, align_used = compute_aligned_M_and_alignment(
-            M, topk, local_num_experts, block_m, expert_tokens_meta
+            M,
+            topk,
+            local_num_experts,
+            block_m,
+            expert_tokens_meta,
+            for_workspace_sizing=True,
         )
         assert M_sum % align_used == 0
 
