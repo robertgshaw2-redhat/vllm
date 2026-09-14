@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -1033,6 +1034,11 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             "DeepEP v2 (ElasticBuffer) not available. Requires DeepEP >= 2.0 "
             "(https://github.com/deepseek-ai/DeepEP) and NCCL >= 2.30.4."
         )
+        # Async combine (async_with_compute_stream=True) must keep its
+        # output tensors alive on the returned event rather than via
+        # Tensor.record_stream, which DeepEP documents as incompatible with
+        # CUDA graph capture.
+        os.environ.setdefault("EP_AVOID_RECORD_STREAM", "1")
         super().__init__(cpu_group, tcp_store_group)
         self._device_group = device_group
         self.handle_cache = Cache()

@@ -89,8 +89,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         use cudagraphs anyway
       - Provides expert_tokens_meta for efficient batched expert kernels
 
-    Both modes use async_with_compute_stream=False (synchronous from
-    caller's perspective). The ElasticBuffer handles comm internally.
+    Dispatch uses async_with_compute_stream=False (synchronous from the
+    caller's perspective; there is no compute to overlap before the recv
+    data is needed). Combine runs with async_with_compute_stream=True in
+    `finalize_async` so shared expert compute enqueued between
+    `finalize_async` and its receiver overlaps with the combine kernels
+    on DeepEP's comm stream.
     """
 
     @staticmethod
@@ -469,8 +473,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
-            async_with_compute_stream=False,
+            async_with_compute_stream=do_async,
         )
+
+        if do_async:
+
+            def _receiver():
+                if event.event is not None:
+                    event.current_stream_wait()
+                output.copy_(combined_x, non_blocking=True)
+
+            return _receiver
 
         output.copy_(combined_x, non_blocking=True)
         return None
@@ -484,16 +497,17 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        self._finalize(
+        receiver = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
             weight_and_reduce_impl,
-            False,
+            True,
         )
-        return lambda: None
+        assert receiver is not None
+        return receiver
 
     def finalize(
         self,
