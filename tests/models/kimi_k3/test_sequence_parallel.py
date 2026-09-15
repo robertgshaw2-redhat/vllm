@@ -134,6 +134,33 @@ def test_moe_sequence_parallel_requires_data_parallel(
     assert parallel_config.use_sequence_parallel_moe is expected
 
 
+@pytest.mark.parametrize(
+    ("all2all_backend", "expected"),
+    [
+        ("deepep_high_throughput", True),
+        ("deepep_low_latency", True),
+        ("deepep_v2", True),
+        ("flashinfer_nvlink_two_sided", False),
+    ],
+)
+def test_moe_sequence_parallel_backend_gating(
+    monkeypatch,
+    all2all_backend: str,
+    expected: bool,
+):
+    """SP-MoE only activates for all2all backends whose dispatch handles
+    sequence-sharded input; unsupported backends keep it off."""
+    monkeypatch.setattr(current_platform, "device_count", lambda: 2)
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=2,
+        data_parallel_size=2,
+        enable_expert_parallel=True,
+        all2all_backend=all2all_backend,
+    )
+
+    assert parallel_config.use_sequence_parallel_moe is expected
+
+
 def test_kimi_decoder_layer_keeps_moe_states_sequence_sharded(monkeypatch):
     layer = object.__new__(kimi_model.KimiDecoderLayer)
     nn.Module.__init__(layer)
