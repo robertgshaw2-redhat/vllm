@@ -15,7 +15,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID, create_model_runner_output
 from vllm.config import KVEventsConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -4666,3 +4666,84 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+def _engine_step(runner, complete_transfers: bool) -> SchedulerOutput:
+    """One synchronous scheduler + worker step."""
+    scheduler_output = runner.scheduler.schedule()
+    runner._update_gpu_blocks()
+    meta = scheduler_output.kv_connector_metadata
+    runner.worker_connector.handle_preemptions(meta)
+    runner.worker_connector.bind_connector_metadata(meta)
+    runner.worker_connector.start_load_kv(runner._dummy_ctx)
+    if complete_transfers:
+        runner.offloading_spec.complete_transfers()
+    finished_sending, finished_recving = runner.worker_connector.get_finished(
+        scheduler_output.finished_req_ids
+    )
+    worker_meta = (
+        runner.worker_connector.build_connector_worker_meta()
+        or OffloadingWorkerMetadata()
+    )
+    runner.worker_connector.clear_connector_metadata()
+    model_runner_output = create_model_runner_output(
+        reqs=runner.scheduler.running,
+        finished_sending=finished_sending,
+        finished_recving=finished_recving,
+        token_id=EOS_TOKEN_ID,
+        kv_connector_worker_meta=worker_meta,
+    )
+    runner.scheduler.update_from_output(scheduler_output, model_runner_output)
+    return scheduler_output
+
+
+@pytest.mark.parametrize("num_lookahead_tokens", [0, 1])
+def test_async_load_holders_drain_pool_then_head_promotion_starves(
+    request_runner, num_lookahead_tokens: int
+):
+    """Full-hit async loads take exactly their prefix blocks and reserve
+    nothing, so with nothing running they can drain the pool to zero. When
+    the loads land only the queue head is promoted; with lookahead it needs
+    one more block, allocate_slots fails and the waiting loop breaks before
+    the other holders are visited. Nothing runs, nothing frees, forever."""
+    block_size = 4
+    num_holders = 4
+    runner = request_runner(
+        block_size=block_size,
+        # +1 for the null block: the usable pool is exactly num_holders prompts.
+        num_gpu_blocks=num_holders * 2 + 1,
+        async_scheduling=False,
+    )
+    sched = runner.scheduler
+    sched.num_lookahead_tokens = num_lookahead_tokens
+    runner.manager.prepare_store.side_effect = lambda keys, ctx: generate_store_output(
+        []
+    )
+    # Every 8-token prompt is a full 2-chunk hit in the offload tier.
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    for i in range(num_holders):
+        runner.new_request(token_ids=[i + 1] * 2 * block_size)
+
+    _engine_step(runner, complete_transfers=False)
+    assert [r.status for r in sched.requests.values()] == (
+        [RequestStatus.WAITING_FOR_REMOTE_KVS] * num_holders
+    )
+    assert sched.kv_cache_manager.block_pool.get_num_free_blocks() == 0
+
+    scheduled = [
+        _engine_step(runner, complete_transfers=True).total_num_scheduled_tokens
+        for _ in range(6)
+    ]
+    if num_lookahead_tokens == 0:
+        assert any(scheduled)
+        return
+
+    assert not any(scheduled), scheduled
+    assert not sched.running
+    statuses = sorted(r.status.name for r in sched.requests.values())
+    assert statuses == ["WAITING"] + ["WAITING_FOR_REMOTE_KVS"] * (num_holders - 1)
+    head = sched.skipped_waiting.peek_request()
+    assert head.status == RequestStatus.WAITING
+    assert head.num_computed_tokens == 2 * block_size - 1
+    stuck = [r for r in sched.requests.values() if r.status != RequestStatus.WAITING]
+    assert all(r.request_id in sched.finished_recving_kv_req_ids for r in stuck)
