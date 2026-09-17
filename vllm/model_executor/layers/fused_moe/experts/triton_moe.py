@@ -497,6 +497,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 quantization_emulation=self.quantization_emulation,
             )
 
+        # The w2 kernel skips slots whose topk_id is -1 (e.g. non-local slots
+        # from DeepEP v2 non-expand dispatch); zero them so moe_sum ignores them.
+        if expert_map is not None:
+            intermediate_cache3.zero_()
+
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
         # unquantized intermediate_cache2 as the lora_a input.  Reuses the
         # sorted_token_ids_lora computed above. Same dual-stream pattern as

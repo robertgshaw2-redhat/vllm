@@ -161,6 +161,7 @@ def deepep_v2_moe_impl(
     topk: int,
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
+    use_cudagraph: bool,
 ) -> torch.Tensor:
     num_local_experts = w1.size(0)
 
@@ -197,19 +198,21 @@ def deepep_v2_moe_impl(
         q_dtype,
         use_fp8_dispatch,
         quant_config,
+        use_cudagraph=use_cudagraph,
     )
 
-    out = mk.apply(
-        hidden_states=test_tensors.rank_tokens,
-        w1=w1,
-        w2=w2,
-        topk_weights=test_tensors.topk_weights,
-        topk_ids=test_tensors.topk,
-        activation=MoEActivation.SILU,
-        global_num_experts=num_experts,
-        expert_map=build_expert_map(),
-        apply_router_weight_on_input=False,
-    )
+    with set_forward_context(None, VllmConfig()):
+        out = mk.apply(
+            hidden_states=test_tensors.rank_tokens,
+            w1=w1,
+            w2=w2,
+            topk_weights=test_tensors.topk_weights,
+            topk_ids=test_tensors.topk,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=build_expert_map(),
+            apply_router_weight_on_input=False,
+        )
 
     return out
 
@@ -224,6 +227,7 @@ def _deep_ep_v2_moe(
     w2_scale: torch.Tensor | None,
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
+    use_cudagraph: bool,
 ):
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
@@ -286,6 +290,7 @@ def _deep_ep_v2_moe(
             config.topk,
             use_fp8_dispatch,
             per_act_token_quant,
+            use_cudagraph,
         )
 
     if is_quantized:
@@ -317,6 +322,7 @@ DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
+@pytest.mark.parametrize("use_cudagraph", [False, True])
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
 def test_deep_ep_v2_moe(
@@ -327,6 +333,7 @@ def test_deep_ep_v2_moe(
     num_experts: int,
     topk: int,
     world_dp_size: tuple[int, int],
+    use_cudagraph: bool,
     workspace_init,
 ):
     per_act_token_quant = False
@@ -356,6 +363,7 @@ def test_deep_ep_v2_moe(
         w2_scale,
         use_fp8_dispatch,
         per_act_token_quant,
+        use_cudagraph,
     )
 
 
