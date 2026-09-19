@@ -229,6 +229,19 @@ def test_plan_uses_state_params(monkeypatch):
     assert kwargs["kv_data_type"] == torch.bfloat16
 
 
+@pytest.mark.parametrize(
+    "kv_dtype,spec_dtype,expected",
+    [
+        ("fp8", torch.uint8, torch.float8_e4m3fn),
+        ("fp8_e4m3", torch.uint8, torch.float8_e4m3fn),
+        ("auto", torch.bfloat16, torch.bfloat16),
+    ],
+)
+def test_plan_kv_dtype_maps_fp8_storage(kv_dtype, spec_dtype, expected):
+    """plan() rejects the uint8 storage dtype the KV spec carries for FP8."""
+    assert sm90_mod._plan_kv_dtype(kv_dtype, spec_dtype) is expected
+
+
 def test_kv_lens_host_formula():
     """Per-row host lengths: context == position + 1; capped at
     index_topk + trailing-pool remainder past the sparse threshold."""

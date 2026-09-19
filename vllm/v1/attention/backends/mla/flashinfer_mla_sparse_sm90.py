@@ -64,6 +64,13 @@ _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
 
 
+def _plan_kv_dtype(kv_cache_dtype: str, spec_dtype: torch.dtype) -> torch.dtype:
+    """FP8 caches are stored as uint8; FlashInfer plans on the e4m3 dtype."""
+    if kv_cache_dtype in _FP8_KV_DTYPES:
+        return torch.float8_e4m3fn
+    return spec_dtype
+
+
 class FlashInferMLASparseSM90Backend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -289,7 +296,7 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
         self.state = _SM90State(
             device,
             impl.num_heads,
-            kv_cache_spec.dtype,
+            _plan_kv_dtype(impl.kv_cache_dtype, kv_cache_spec.dtype),
             vllm_config.scheduler_config.max_num_batched_tokens,
             topk_indices_buffer.shape[1],
             kv_lora_rank=impl.kv_lora_rank,
