@@ -522,7 +522,9 @@ class KVCacheManager:
                 apply_admission_cap=True,
             )
             required_blocks = num_blocks_to_allocate + watermark_blocks
-            if required_blocks > self.block_pool.get_num_free_blocks():
+            if required_blocks > max(
+                0, self.block_pool.get_num_free_blocks() - reserved_blocks
+            ):
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -558,7 +560,11 @@ class KVCacheManager:
 
         # Keep `reserved_blocks` free for other in-flight sequences, and an
         # additional watermark of headroom for waiting/preempted admissions.
-        available_blocks = self.block_pool.get_num_free_blocks() - reserved_blocks
+        # A reservation withholds free blocks; it never rejects a request that
+        # needs no new block (e.g. a promoted load already holding its blocks).
+        available_blocks = max(
+            0, self.block_pool.get_num_free_blocks() - reserved_blocks
+        )
         required_blocks = num_blocks_to_allocate + watermark_blocks
         if required_blocks > available_blocks:
             # Cannot allocate new blocks

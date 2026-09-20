@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
@@ -791,3 +792,181 @@ def test_async_load_reserves_blocks_for_promotion_margin():
     scheduler_output = scheduler.schedule()
     assert req_a.status == RequestStatus.RUNNING
     assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+@contextmanager
+def _delayed_free(scheduler):
+    """Finished requests keep their blocks, as on a NIXL pull-mode P node."""
+    with (
+        patch.object(
+            scheduler.connector, "request_finished", return_value=(True, None)
+        ),
+        patch.object(
+            scheduler.connector,
+            "request_finished_all_groups",
+            return_value=(True, None),
+        ),
+    ):
+        yield
+
+
+def test_sync_admission_does_not_consume_parked_load_reservation():
+    """A plain (sync) admission must respect the blocks parked async loads still
+    need, or it can wedge them.
+
+    req_a (partial load, 2 of 4 blocks) and req_b (full load, 1 block) are
+    parked. Their admission left room for req_a's remaining 2 blocks, but req_w
+    (3 blocks, no external hit) would take it, finish, and keep its blocks
+    pinned (delayed free) until a remote reader releases them. req_a would then
+    be promoted into a pool with no room and stall at the head of
+    ``skipped_waiting``, with nothing running to free anything.
+    """
+    vllm_config = create_vllm_config()
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+    block_pool = scheduler.kv_cache_manager.block_pool
+
+    req_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 1,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_w = create_request(
+        request_id=3, block_size=BLOCK_SIZE, num_tokens=BLOCK_SIZE * 3, max_tokens=1
+    )
+    hits = {
+        req_a.request_id: (BLOCK_SIZE * 2, True),
+        req_b.request_id: (BLOCK_SIZE * 1, True),
+    }
+    for req in (req_a, req_b, req_w):
+        scheduler.add_request(req)
+
+    with (
+        patch.object(
+            scheduler.connector,
+            "get_num_new_matched_tokens",
+            lambda request, _: hits.get(request.request_id, (0, False)),
+        ),
+        _delayed_free(scheduler),
+    ):
+        out = scheduler.schedule()
+        assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert req_b.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        # req_w is held back: free (4) - req_a's remaining (2) < its 3 blocks.
+        assert req_w.status == RequestStatus.WAITING
+        assert block_pool.get_num_free_blocks() == 4
+
+        scheduler.update_from_output(
+            out, create_model_runner_output([], finished_recving={req_a.request_id})
+        )
+        out = scheduler.schedule()
+        assert req_a.status == RequestStatus.RUNNING
+        assert out.num_scheduled_tokens[req_a.request_id] == BLOCK_SIZE * 2
+
+        scheduler.update_from_output(
+            out,
+            create_model_runner_output(
+                [req_a], use_eos=True, finished_recving={req_b.request_id}
+            ),
+        )
+        out = scheduler.schedule()
+        assert req_b.status == RequestStatus.RUNNING
+        assert out.num_scheduled_tokens[req_b.request_id] == 1
+
+
+def test_stuck_promoted_load_does_not_starve_loads_behind_it():
+    """A promoted load that cannot grow must not block the rest of
+    ``skipped_waiting``.
+
+    req_r is a running decode that grows into the room kept for the parked
+    req_a (partial load) and is then pinned by a delayed free. When req_a
+    lands it is promoted but cannot allocate its remaining blocks. If the
+    scheduler breaks there, req_b behind it is never promoted although its
+    completed load needs no new block, and the engine sits with nothing
+    running until the pinned blocks come back.
+    """
+    vllm_config = create_vllm_config()
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+    block_pool = scheduler.kv_cache_manager.block_pool
+
+    req_r = create_request(
+        request_id=1, block_size=BLOCK_SIZE, num_tokens=BLOCK_SIZE - 1, max_tokens=64
+    )
+    req_a = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    req_b = create_request(
+        request_id=3,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 1,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    hits = {
+        req_a.request_id: (BLOCK_SIZE * 2, True),
+        req_b.request_id: (BLOCK_SIZE * 1, True),
+    }
+    for req in (req_r, req_a, req_b):
+        scheduler.add_request(req)
+
+    with (
+        patch.object(
+            scheduler.connector,
+            "get_num_new_matched_tokens",
+            lambda request, _: hits.get(request.request_id, (0, False)),
+        ),
+        _delayed_free(scheduler),
+    ):
+        out = scheduler.schedule()
+        assert req_r.status == RequestStatus.RUNNING
+        assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert req_b.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert block_pool.get_num_free_blocks() == 3
+
+        # req_r decodes until only one free block is left, then finishes and
+        # keeps its blocks.
+        for _ in range(3 * BLOCK_SIZE):
+            if block_pool.get_num_free_blocks() == 1:
+                break
+            scheduler.update_from_output(out, create_model_runner_output([req_r]))
+            out = scheduler.schedule()
+        assert block_pool.get_num_free_blocks() == 1
+        scheduler.update_from_output(
+            out, create_model_runner_output([req_r], use_eos=True)
+        )
+        assert req_r.is_finished()
+        assert not scheduler.running
+
+        # req_a lands and is promoted, but its remaining 2 blocks do not fit.
+        out = scheduler.schedule()
+        scheduler.update_from_output(
+            out, create_model_runner_output([], finished_recving={req_a.request_id})
+        )
+        out = scheduler.schedule()
+        assert req_a.status == RequestStatus.WAITING
+        assert not out.num_scheduled_tokens
+
+        # req_b lands: it needs no new block and must run despite req_a.
+        scheduler.update_from_output(
+            out, create_model_runner_output([], finished_recving={req_b.request_id})
+        )
+        out = scheduler.schedule()
+        assert req_b.status == RequestStatus.RUNNING
+        assert out.num_scheduled_tokens[req_b.request_id] == 1
+        # req_a keeps its place at the front for when blocks come back.
+        assert req_a.status == RequestStatus.WAITING
+        assert scheduler.skipped_waiting.peek_request() is req_a

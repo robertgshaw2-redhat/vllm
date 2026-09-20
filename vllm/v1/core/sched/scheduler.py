@@ -1147,7 +1147,6 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                reserved_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
                     # no forward progress and isn't preemptible here. Admit it
@@ -1157,6 +1156,14 @@ class Scheduler(SchedulerInterface):
                     reserved_blocks = (
                         self._inflight_prefill_reserved_blocks()
                         + self._spec_decode_step_blocks()
+                    )
+                else:
+                    # A sync admission must not consume the blocks a parked
+                    # (non-running, non-preemptible) load needs to be promoted:
+                    # once admitted it can finish and pin them (delayed free)
+                    # before the load lands, wedging the load.
+                    reserved_blocks = self._inflight_prefill_reserved_blocks(
+                        parked_only=True, exclude=request
                     )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
@@ -1180,6 +1187,17 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+                    if (
+                        request_queue is self.skipped_waiting
+                        and request.num_computed_tokens > 0
+                    ):
+                        # A promoted load already holds its blocks and cannot
+                        # be preempted to make room. Breaking here would leave
+                        # the loads behind it unpromoted (holding blocks) and
+                        # starve `waiting`; requeue it at the front instead.
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
                     break
 
                 # KVTransfer: the connector uses this info to determine
@@ -2957,10 +2975,20 @@ class Scheduler(SchedulerInterface):
             1 + self.num_spec_tokens + self.num_lookahead_tokens, self.block_size
         )
 
-    def _inflight_prefill_reserved_blocks(self) -> int:
-        """Num blocks in-flight prefills still need to finish (their reservation)."""
+    def _inflight_prefill_reserved_blocks(
+        self, parked_only: bool = False, exclude: Request | None = None
+    ) -> int:
+        """Num blocks in-flight prefills still need to finish (their reservation).
+
+        With ``parked_only``, count only prefills that are not running (async
+        loads awaiting or just past promotion), which cannot be preempted to
+        make room.
+        """
         return sum(
-            self._request_remaining_blocks(req) for req in self._inflight_prefills
+            self._request_remaining_blocks(req)
+            for req in self._inflight_prefills
+            if req is not exclude
+            and not (parked_only and req.status == RequestStatus.RUNNING)
         )
 
     def _update_waiting_for_remote_kv(self, request: Request) -> None:
