@@ -766,17 +766,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 parallel_config.prefill_context_parallel_size > 1
                 and parallel_config.decode_context_parallel_size > 1
             )
-            shard_rows = prefill_workspace_size
-            if self.pcp_dcp_kv_gather:
-                # PCP+DCP upconverts this rank's KV shard, then all-gathers the
-                # shards into a workspace of the full prefill size.
-                shard_rows //= parallel_config.decode_context_parallel_size
-            self.prefill_workspace_shape = (shard_rows, head_size)
-            self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
-            if self.pcp_dcp_kv_gather:
-                self.workspace_specs.append(
-                    ((prefill_workspace_size, head_size), torch.bfloat16)
-                )
+            # PCP+DCP upconverts this rank's KV shard into its rank-major slot
+            # of this workspace, then all-gathers the shards in place.
+            self.workspace_specs.append(
+                ((prefill_workspace_size, head_size), torch.bfloat16)
+            )
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:
                 prefill_query_heads *= parallel_config.tensor_parallel_size
@@ -880,6 +874,17 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             return attn_out, lse
         return torch.cat([decode_out, attn_out], dim=0), None
 
+    def _prefill_chunk_workspace(
+        self,
+        prefill_bf16_workspace: torch.Tensor,
+        chunk: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk",
+    ) -> torch.Tensor:
+        """The rows the chunk's KV is upconverted into: under PCP+DCP, this
+        rank's slot of the rank-major gathered layout."""
+        rows = int(chunk.chunk_tot_seqlen)
+        start = self.dcp_rank * rows if self.pcp_dcp_kv_gather else 0
+        return prefill_bf16_workspace[start : start + rows]
+
     def _gather_prefill_chunk(
         self,
         chunk: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill.Chunk",
@@ -889,12 +894,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         prefill_meta: "FlashMLASparseMetadata.FP8SeparatePrefillDecode.Prefill",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """All-gather this rank's upconverted KV shard so the chunk's rows attend
-        the whole context, and map their top-k onto the rank-major result."""
+        the whole context, and map their top-k onto the rank-major result.
+
+        ``shard`` is this rank's slot of the gathered workspace, so the
+        all-gather runs in place."""
         shard_rows = int(chunk.chunk_tot_seqlen)
-        _, _, gathered_kv_workspace, *_ = current_workspace_manager().get_simultaneous(
+        _, prefill_bf16_workspace, *_ = current_workspace_manager().get_simultaneous(
             *self.workspace_specs
         )
-        gathered_kv = gathered_kv_workspace[: self.dcp_world_size * shard_rows]
+        gathered_kv = prefill_bf16_workspace[: self.dcp_world_size * shard_rows]
+        assert shard.data_ptr() == gathered_kv[self.dcp_rank * shard_rows].data_ptr()
         dist.all_gather_into_tensor(
             gathered_kv, shard, group=get_dcp_group().device_group
         )
@@ -952,7 +961,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             prefill_ready = index_group.gather_fp8_prefill(
                 self.index_group_index,
                 kv_c_and_k_pe_cache,
-                prefill_bf16_workspace[: first_chunk.chunk_tot_seqlen],
+                self._prefill_chunk_workspace(prefill_bf16_workspace, first_chunk),
                 first_chunk.block_table,
                 first_chunk.workspace_starts,
                 len(first_chunk.block_table),
@@ -1068,7 +1077,9 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
             assert fp8_metadata.prefill is not None
             for chunk_index, chunk in enumerate(fp8_metadata.prefill.chunks):
-                chunk_workspace = prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
+                chunk_workspace = self._prefill_chunk_workspace(
+                    prefill_bf16_workspace, chunk
+                )
                 if uses_host_cache and chunk_index > 0:
                     assert isinstance(index_group, HiSparseMLAIndexGroup)
                     prefill_ready = index_group.gather_fp8_prefill(

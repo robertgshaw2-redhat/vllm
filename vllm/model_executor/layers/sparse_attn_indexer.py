@@ -139,7 +139,11 @@ def dcp_gather_kv_rows(
     gathered_buf: torch.Tensor,
     out_buf: torch.Tensor,
 ) -> torch.Tensor:
-    """All-gather this rank's KV shard and return it in global token order."""
+    """All-gather this rank's KV shard and return it in global token order.
+
+    ``out_buf`` may alias ``local_padded``: the synchronous all-gather has
+    consumed the shard before the de-interleave writes it."""
+    assert deinterleave_idx.shape[0] <= out_buf.shape[0]
     gathered = gathered_buf[: get_dcp_group().world_size * local_padded.shape[0]]
     dist.all_gather_into_tensor(
         gathered, local_padded.contiguous(), group=get_dcp_group().device_group
@@ -372,12 +376,13 @@ def sparse_attn_indexer(
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         ]
         if use_pcp and dcp_world_size > 1:
-            # The PCP+DCP path takes an all-gather destination and a
-            # de-interleaved result.
-            gather_spec = _gather_workspace_shapes(
-                total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            # The PCP+DCP path takes an all-gather destination; the
+            # de-interleaved result reuses the local buffers.
+            profile_specs.extend(
+                _gather_workspace_shapes(
+                    total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+                )
             )
-            profile_specs.extend(gather_spec * 2)
         current_workspace_manager().get_simultaneous(*profile_specs)
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
@@ -490,23 +495,24 @@ def sparse_attn_indexer(
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
-        # PCP + DCP needs two more pairs: the rank-major all-gather destination
-        # and the de-interleaved result.
-        pcp_chunks = [
-            (c, c.pcp_deinterleave_idx)
-            for c in prefill_metadata.chunks
-            if c.pcp_deinterleave_idx is not None
-        ]
+        # PCP + DCP needs one more pair, the rank-major all-gather destination.
+        # The de-interleaved result goes back into the local buffers, whose
+        # shard the all-gather has consumed.
+        gathered_rows = max(
+            (
+                dcp_world_size * c.local_total_seq_lens
+                for c in prefill_metadata.chunks
+                if c.pcp_deinterleave_idx is not None
+            ),
+            default=0,
+        )
         gather_specs: list[tuple[tuple[int, int], torch.dtype]] = []
-        if pcp_chunks:
-            gathered_rows = max(
-                dcp_world_size * c.local_total_seq_lens for c, _ in pcp_chunks
-            )
-            deinterleaved_rows = max(idx.shape[0] for _, idx in pcp_chunks)
-            for rows in (gathered_rows, deinterleaved_rows):
-                gather_specs.extend(
-                    _gather_workspace_shapes(rows, head_dim, fp8_dtype, use_fp4_cache)
+        if gathered_rows:
+            gather_specs.extend(
+                _gather_workspace_shapes(
+                    gathered_rows, head_dim, fp8_dtype, use_fp4_cache
                 )
+            )
         k_quant_full, k_scale_full, *gather_bufs = workspace_manager.get_simultaneous(
             values_spec,
             scales_spec,
@@ -532,17 +538,23 @@ def sparse_attn_indexer(
             if deinterleave_idx is not None:
                 # local_total_seq_lens is the PCP-padded extent here, so every
                 # rank contributes an identically shaped shard.
-                gathered_values, gathered_scales, out_values, out_scales = gather_bufs
-                shard = k_quant[: chunk.local_total_seq_lens]
-                k_quant = dcp_gather_kv_rows(
-                    shard, deinterleave_idx, gathered_values, out_values
-                )
-                k_scale = dcp_gather_kv_rows(
-                    k_scale[: chunk.local_total_seq_lens],
-                    deinterleave_idx,
-                    gathered_scales,
-                    out_scales,
-                )
+                # A query sub-chunk reuses the context its predecessor gathered.
+                if not chunk.skip_kv_gather:
+                    gathered_values, gathered_scales = gather_bufs
+                    dcp_gather_kv_rows(
+                        k_quant[: chunk.local_total_seq_lens],
+                        deinterleave_idx,
+                        gathered_values,
+                        k_quant_full,
+                    )
+                    dcp_gather_kv_rows(
+                        k_scale[: chunk.local_total_seq_lens],
+                        deinterleave_idx,
+                        gathered_scales,
+                        k_scale_full,
+                    )
+                k_quant = k_quant_full[: deinterleave_idx.shape[0]]
+                k_scale = k_scale_full[: deinterleave_idx.shape[0]]
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             q_scale_slice = (
