@@ -71,6 +71,10 @@ logger = init_logger(__name__)
 # so when the per-rank head count is below MIN_HEADS_FOR_BF16_PREFILL we use the mixed
 # batch mode (#1).
 MIN_HEADS_FOR_BF16_PREFILL = 32
+# The BF16 prefill kernel runs over at most this many tokens per call, which
+# bounds its head-padded query/output workspace independently of
+# max_num_batched_tokens.
+MAX_BF16_PREFILL_KERNEL_TOKENS = 8192
 
 """
 NOTE: FlashMLA Sparse uses an fp8 cache with the following format
@@ -735,7 +739,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 // self.prefill_padding
                 * self.prefill_padding
             )
-        q_concat_shape = (max_tokens, q_concat_heads, head_size)
+        # PCP with DCP across TP concatenates and head-gathers q before
+        # forward_mqa, so the concat buffer goes unused.
+        q_concat_tokens = (
+            0
+            if self.pcp_world_size > 1 and self.dcp_world_size > self.pcp_world_size
+            else max_tokens
+        )
+        q_concat_shape = (q_concat_tokens, q_concat_heads, head_size)
         if is_quantized_kv_cache(kv_cache_dtype):
             assert kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS, (
                 "FlashMLA Sparse Attention backend only supports the "
@@ -777,11 +788,12 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             padded_prefill_query_heads = round_up(
                 prefill_query_heads, self.prefill_padding
             )
+            kernel_tokens = min(max_tokens, MAX_BF16_PREFILL_KERNEL_TOKENS)
             self.workspace_specs.extend(
                 (shape, torch.bfloat16)
                 for shape in (
-                    (max_tokens, padded_prefill_query_heads, head_size),
-                    (max_tokens, padded_prefill_query_heads, self.kv_lora_rank),
+                    (kernel_tokens, padded_prefill_query_heads, head_size),
+                    (kernel_tokens, padded_prefill_query_heads, self.kv_lora_rank),
                     (max_tokens, prefill_query_heads, self.kv_lora_rank),
                 )
             )
@@ -1128,15 +1140,21 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     assert topk_length is not None
                     chunk_topk_length = topk_length[chunk.tokens_slice]
 
-                chunk_out, chunk_lse = self._bf16_flash_mla_kernel(
-                    chunk_q,
-                    chunk_workspace,
-                    chunk_topk_indices_workspace,
-                    chunk_topk_length,
-                    out=padded_out[chunk.tokens_slice],
-                )
-                attn_out[chunk.tokens_slice].copy_(chunk_out)
-                del chunk_out, chunk_lse
+                # Tokens attend independently through their top-k, so the
+                # kernel can run over sub-slices bounded by padded_out.
+                chunk_start = chunk.tokens_slice.start
+                chunk_len = chunk_q.shape[0]
+                step = padded_out.shape[0]
+                for start in range(0, chunk_len, step):
+                    end = min(start + step, chunk_len)
+                    sub_out, _ = self._bf16_flash_mla_kernel(
+                        chunk_q[start:end],
+                        chunk_workspace,
+                        chunk_topk_indices_workspace[start:end],
+                        chunk_topk_length[start:end],
+                        out=padded_out[: end - start],
+                    )
+                    attn_out[chunk_start + start : chunk_start + end].copy_(sub_out)
 
         if self.pcp_dcp_kv_gather and lse is None:
             # No decode rows: the DCP merge still expects an LSE, of no rows.
