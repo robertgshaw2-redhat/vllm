@@ -406,13 +406,14 @@ class Worker(WorkerBase):
                 if dp_local_rank is None:
                     dp_local_rank = self.parallel_config.data_parallel_index
 
-                tp_pp_world_size = (
+                tp_pcp_pp_world_size = (
                     self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.prefill_context_parallel_size
                     * self.parallel_config.tensor_parallel_size
                 )
 
-                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
-                self.local_rank += dp_local_rank * tp_pp_world_size
+                # DP_LOCAL_RANK * TP_PCP_PP_WORLD_SIZE + TP_LOCAL_RANK
+                self.local_rank += dp_local_rank * tp_pcp_pp_world_size
 
             # Publish the logical-to-physical mapping for topology queries
             # such as NIC affinity and P2P checks.
@@ -604,10 +605,20 @@ class Worker(WorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
+        with (
+            memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result,
+            # Workspaces (e.g. the MoE workspace) grow in steps during this pass,
+            # freeing each smaller buffer. Without a split limit, a later small
+            # allocation can be carved out of a freed multi-GiB block and pin the
+            # whole segment past the empty_cache() in memory_profiling, so it is
+            # counted as consumed and taken from the KV cache. Blocks above the
+            # limit are never split, so they stay releasable. Exits before
+            # memory_profiling measures, restoring the original limit.
+            self._scoped_allocator_max_split(max_split_size_mb=20),
+        ):
             self.model_runner.profile_run()
 
         # Profile CUDA graph memory if graphs will be captured.
