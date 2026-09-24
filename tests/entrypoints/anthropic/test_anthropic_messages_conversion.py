@@ -44,7 +44,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
@@ -785,6 +789,21 @@ class TestBuildAnthropicUsage:
         assert result.input_tokens == 100
         assert result.cache_read_input_tokens is None
         assert result.cache_creation_input_tokens is None
+        assert result.output_tokens_details is None
+
+    def test_reasoning_tokens_reported_as_thinking_tokens(self):
+        """Reasoning tokens from the reasoning parser surface as thinking_tokens."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=50,
+            completion_tokens_details=CompletionTokenUsageInfo(reasoning_tokens=30),
+        )
+        result = _build_anthropic_usage(usage)
+        assert result.output_tokens == 50
+        assert result.output_tokens_details is not None
+        assert result.output_tokens_details.thinking_tokens == 30
+        dumped = json.loads(result.model_dump_json(exclude_unset=True))
+        assert dumped["output_tokens_details"] == {"thinking_tokens": 30}
 
 
 class TestInlineSystemMessageInMessagesArray:

@@ -26,6 +26,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicOutputConfig,
+    AnthropicOutputTokensDetails,
     AnthropicStreamEvent,
     AnthropicUsage,
 )
@@ -65,12 +66,13 @@ def _build_anthropic_usage(
     When cache info is absent (e.g. ``--enable-prompt-tokens-details``
     off, or a streaming chunk that hasn't carried it yet), cache fields
     are left **unset** so ``exclude_unset=True`` serialization omits them
-    entirely.
+    entirely. ``output_tokens_details`` is likewise only set when
+    ``completion_tokens_details`` is present (i.e. a reasoning parser is on).
 
     ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
     intermediate stream chunks; we coerce to ``0`` for the wire format.
     """
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if usage is None:
         kwargs["input_tokens"] = 0
         kwargs["output_tokens"] = 0
@@ -88,6 +90,11 @@ def _build_anthropic_usage(
                 kwargs["cache_creation_input_tokens"] = cache_creation
 
         kwargs["input_tokens"] = max(0, input_tokens)
+
+        if (out_details := usage.completion_tokens_details) is not None:
+            kwargs["output_tokens_details"] = AnthropicOutputTokensDetails(
+                thinking_tokens=out_details.reasoning_tokens
+            )
     return AnthropicUsage(**kwargs)
 
 
