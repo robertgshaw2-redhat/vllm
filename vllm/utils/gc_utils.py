@@ -117,6 +117,25 @@ def freeze_gc_for_cudagraph_capture():
                     gc.disable()
 
 
+@contextmanager
+def gc_paused_for_imports():
+    """Turn the cyclic GC off while importing, then freeze what was imported.
+
+    Imports create hundreds of thousands of long-lived objects and little
+    garbage, yet each collection rescans them all: 15-20% of vLLM's import
+    time. Freezing keeps later collections from rescanning them too.
+    """
+    if not gc.isenabled():
+        yield
+        return
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.freeze()
+        gc.enable()
+
+
 def freeze_gc_heap() -> None:
     """Freeze all objects tracked by the garbage collector. It should be invoked
     after server init / warmup, to reduce GC overhead from static objects
