@@ -6,7 +6,7 @@ from argparse import Namespace
 import pytest
 
 from vllm.entrypoints.generate.base.protocol import StreamOptions
-from vllm.entrypoints.serve.utils import api_utils
+from vllm.entrypoints.serve.utils import cli_utils
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
     redact_sensitive_args,
@@ -153,9 +153,9 @@ class TestRedactSensitiveArgs:
             "enable_auto_tool_choice": True,
             "tool_call_parser": "qwen3_coder",
         }
-        monkeypatch.setattr(api_utils, "get_non_default_args", lambda args: non_default)
-        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.api_utils"):
-            api_utils.log_non_default_args(args=Namespace())
+        monkeypatch.setattr(cli_utils, "get_non_default_args", lambda args: non_default)
+        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.cli_utils"):
+            cli_utils.log_non_default_args(args=Namespace())
         message = caplog.text
         assert self.API_KEY not in message
         assert "'api_key': '***'" in message
@@ -170,9 +170,9 @@ class TestRedactSensitiveArgs:
             "hf_token": hf_token,
             "tool_call_parser": "qwen3_coder",
         }
-        monkeypatch.setattr(api_utils, "get_non_default_args", lambda args: non_default)
-        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.api_utils"):
-            api_utils.log_non_default_args(args=Namespace())
+        monkeypatch.setattr(cli_utils, "get_non_default_args", lambda args: non_default)
+        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.cli_utils"):
+            cli_utils.log_non_default_args(args=Namespace())
         message = caplog.text
         assert hf_token not in message
         assert "'hf_token': '***'" in message

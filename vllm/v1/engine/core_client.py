@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
-from typing import Any, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 import msgspec
 import msgspec.msgpack
@@ -27,7 +27,6 @@ from vllm.config.kv_events import KVEventsConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.async_utils import in_loop
@@ -38,6 +37,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
+    ENGINE_CORE_DEAD,
     FT_STATUS_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
@@ -50,7 +50,6 @@ from vllm.v1.engine import (
     UtilityOutput,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
@@ -67,6 +66,9 @@ from vllm.v1.fault_tolerance.utils import (
 )
 from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+
+if TYPE_CHECKING:
+    from vllm.renderers import BaseRenderer
 
 logger = init_logger(__name__)
 
@@ -98,7 +100,7 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        renderer: BaseRenderer | None = None,
+        renderer: "BaseRenderer | None" = None,
     ) -> "EngineCoreClient":
         # renderer is passed through to the multiprocess clients, which start
         # the frontend MM warmup (renderer.start_mm_warmup_in_background) once
@@ -141,7 +143,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
+        renderer: "BaseRenderer | Callable[[], BaseRenderer] | None" = None,
     ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
@@ -370,6 +372,8 @@ class InprocClient(EngineCoreClient):
         *,
         executor_fail_callback: Callable | None = None,
     ):
+        from vllm.v1.engine.core import EngineCore
+
         self.engine_core = EngineCore(
             vllm_config,
             executor_class,
@@ -568,7 +572,7 @@ class BackgroundResources:
         logger.debug_once("[shutdown] MPClient: background resource cleanup complete")
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
-        if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
+        if len(frames) == 1 and (frames[0].buffer == ENGINE_CORE_DEAD):
             self.engine_dead = True
             raise EngineDeadError()
 
@@ -606,7 +610,7 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
         client_addresses: dict[str, Any] | None = None,
-        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
+        renderer: "BaseRenderer | Callable[[], BaseRenderer] | None" = None,
     ):
         self.vllm_config = vllm_config
         # A factory is invoked once the engine-core processes have started,
@@ -819,10 +823,10 @@ class MPClient(EngineCoreClient):
         # engine-core model load. This is a no-op when no renderer was passed
         # (e.g. text-only serving or tests).
         renderer = self._renderer
-        if renderer is not None and not isinstance(renderer, BaseRenderer):
+        if callable(renderer):
             # Build the frontend on a thread: the engine-core handshake is
             # served by this thread while the engines start up.
-            def init_frontend() -> BaseRenderer:
+            def init_frontend() -> "BaseRenderer":
                 built = renderer()
                 built.start_mm_warmup_in_background()
                 return built
@@ -966,7 +970,7 @@ class SyncMPClient(MPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
+        renderer: "BaseRenderer | Callable[[], BaseRenderer] | None" = None,
     ):
         super().__init__(
             asyncio_mode=False,
@@ -1161,7 +1165,7 @@ class AsyncMPClient(MPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
+        renderer: "BaseRenderer | Callable[[], BaseRenderer] | None" = None,
     ):
         super().__init__(
             asyncio_mode=True,
@@ -1474,7 +1478,7 @@ class DPAsyncMPClient(AsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
+        renderer: "BaseRenderer | Callable[[], BaseRenderer] | None" = None,
     ):
         self.current_wave = 0
 
@@ -1658,7 +1662,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
+        renderer: "BaseRenderer | Callable[[], BaseRenderer] | None" = None,
     ):
         self.client_count = client_count
 

@@ -77,7 +77,7 @@ def main():
         zygote.start()
 
     with gc_paused_for_imports():
-        from vllm.entrypoints.serve.utils.api_utils import (
+        from vllm.entrypoints.serve.utils.cli_utils import (
             VLLM_SUBCMD_PARSER_EPILOG,
             cli_env_setup,
         )
