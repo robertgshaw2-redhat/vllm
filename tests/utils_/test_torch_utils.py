@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 import torch
@@ -13,6 +16,7 @@ from vllm.utils.torch_utils import (
     get_kv_cache_torch_dtype,
     is_lossless_cast,
     is_quantized_kv_cache,
+    lazy_torch_compile,
     set_default_torch_dtype,
     set_random_seed,
     set_torch_threads_for_runtime,
@@ -232,3 +236,49 @@ def test_set_random_seed_differs_per_data_parallel_index():
     assert draws(42, 1) == draws(42, 1)
     assert len({str(draws(42, i)) for i in range(4)}) == 4
     assert draws(42, 1) != draws(43, 1)
+
+
+def test_lazy_torch_compile_defers_dynamo_import():
+    """Decorating must not import Dynamo/Inductor: every process importing a
+    module with a module-level compiled function would pay seconds for it."""
+    code = (
+        "import sys, torch\n"
+        "from vllm.utils.torch_utils import lazy_torch_compile\n"
+        "@lazy_torch_compile(dynamic=True, backend='eager')\n"
+        "def f(x):\n"
+        "    return x + 1\n"
+        "assert 'torch._dynamo' not in sys.modules\n"
+        "assert torch.equal(f(torch.ones(2)), torch.full((2,), 2.0))\n"
+        "assert 'torch._dynamo' in sys.modules\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_lazy_torch_compile_compiles_once_and_inlines():
+    compiled_graphs = 0
+
+    def counting_backend(gm, example_inputs):
+        nonlocal compiled_graphs
+        compiled_graphs += 1
+        return gm
+
+    torch._dynamo.reset()
+
+    @lazy_torch_compile(backend=counting_backend)
+    def double(x):
+        return x * 2
+
+    x = torch.arange(4.0)
+    assert torch.equal(double(x), x * 2)
+    assert torch.equal(double(x), x * 2)
+    assert compiled_graphs == 1
+    assert double.__wrapped__(x).equal(x * 2)
+
+    # Traced from an outer compiled region, the inner function is inlined into
+    # the outer graph instead of breaking it.
+    @torch.compile(backend=counting_backend, fullgraph=True)
+    def outer(x):
+        return double(x) + 1
+
+    assert torch.equal(outer(x), x * 2 + 1)
+    assert compiled_graphs == 2

@@ -45,7 +45,7 @@ def test_gather_logprobs_no_recompile():
     import vllm.v1.sample.ops.logprobs as logprobs_module
     import vllm.v1.sample.sampler as sampler_module
 
-    unwrapped = batched_count_greater_than._torchdynamo_orig_callable
+    unwrapped = batched_count_greater_than.__wrapped__
     patched = torch.compile(unwrapped, backend=counting_backend)
     orig_fn = logprobs_module.batched_count_greater_than
 
