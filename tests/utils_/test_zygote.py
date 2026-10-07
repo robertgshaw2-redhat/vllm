@@ -12,9 +12,11 @@ import tempfile
 import threading
 import time
 
+import psutil
 import pytest
 
 from vllm.utils import zygote
+from vllm.utils.system_utils import kill_process_tree
 
 pytestmark = pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="the zygote is Linux-only"
@@ -60,6 +62,13 @@ def _report_grandchild(conn) -> None:
     proc.start()
     w.close()
     conn.send(r.recv())
+    proc.join()
+
+
+def _start_sleeper(conn) -> None:
+    proc = zygote.get_context().Process(target=_sleep)
+    proc.start()
+    conn.send(proc.pid)
     proc.join()
 
 
@@ -126,6 +135,19 @@ def test_grandchild_is_forked_by_the_same_zygote(ctx):
     child = _run(ctx, _report)
     grandchild = _run(ctx, _report_grandchild)
     assert grandchild["ppid"] == child["ppid"]
+
+
+def test_kill_process_tree_reaches_processes_forked_for_the_tree(ctx):
+    # The sleeper descends from proc, but its parent is the zygote.
+    r, w = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_start_sleeper, args=(w,))
+    proc.start()
+    w.close()
+    sleeper = psutil.Process(r.recv())
+    kill_process_tree(proc.pid)
+    proc.join(10)
+    assert proc.exitcode == -signal.SIGKILL
+    sleeper.wait(timeout=10)
 
 
 def test_changed_exec_time_variable_falls_back_to_spawn(ctx, monkeypatch):

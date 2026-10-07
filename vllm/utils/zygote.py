@@ -75,6 +75,7 @@ _EXEC_TIME_ENV = ("LD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONHASHSEED", "PYTHONPATH
 _SUPPORTED = sys.platform.startswith("linux")
 _MAX_FDS = 256
 _TIMEOUT_S = 300.0
+_QUERY_TIMEOUT_S = 30.0
 _LENGTH = struct.Struct("!I")
 
 # Fds passed along with the request that created this process, in order.
@@ -225,6 +226,27 @@ def get_context() -> ZygoteContext:
 def get_running_context() -> ZygoteContext | None:
     """The zygote context if a zygote serves this process tree, else None."""
     return _context if _SUPPORTED and os.environ.get(ADDRESS_ENV) else None
+
+
+def descendants(pids: Iterable[int]) -> list[int]:
+    """The processes the zygote forked at the request of one of `pids`, or of
+    another such process.
+
+    They descend from `pids` as spawned processes would, but their parent is
+    the zygote, so `psutil` does not find them.
+    """
+    address = os.environ.get(ADDRESS_ENV)
+    if not (_SUPPORTED and address):
+        return []
+    try:
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(_QUERY_TIMEOUT_S)
+            sock.connect(address)
+            _send_msg(sock, {"op": "descendants", "pids": list(pids)})
+            return _recv_msg(sock)[0]["pids"]
+    except (OSError, EOFError, ValueError, KeyError) as e:
+        logger.debug("Could not query the zygote at %s: %r", address, e)
+        return []
 
 
 def start(preload: Sequence[str] | None = None) -> str:
@@ -393,19 +415,7 @@ class _ZygoteServer:
         self, listener_fd: int, alive_fd: int, preload: list[str] | None
     ) -> None:
         import vllm.envs as envs
-        from vllm.utils.system_utils import decorate_logs, set_process_title
 
-        set_process_title("Zygote")
-        decorate_logs("Zygote")
-        self.listener = socket.socket(fileno=listener_fd)
-        self.alive_fd = alive_fd
-        self.children: dict[int, int] = {}  # pid -> write end of status pipe
-        self.hazard: str | None = None
-        if preload is None and (preload := _default_preload()) is None:
-            self.hazard = "it supports only CUDA and ROCm"
-            preload = []
-        self.pending = deque(preload)
-        self.closing = False
         # Preloaded modules were imported under this environment, and may
         # have captured the vLLM variables they read.
         self.start_env = dict(os.environ)
@@ -417,6 +427,21 @@ class _ZygoteServer:
             return self.envs_getattr(name)
 
         envs.__getattr__ = recording_getattr  # type: ignore[assignment]
+
+        from vllm.utils.system_utils import decorate_logs, set_process_title
+
+        set_process_title("Zygote")
+        decorate_logs("Zygote")
+        self.listener = socket.socket(fileno=listener_fd)
+        self.alive_fd = alive_fd
+        self.children: dict[int, int] = {}  # pid -> write end of status pipe
+        self.requesters: dict[int, int] = {}  # pid -> pid of its requester
+        self.hazard: str | None = None
+        if preload is None and (preload := _default_preload()) is None:
+            self.hazard = "it supports only CUDA and ROCm"
+            preload = []
+        self.pending = deque(preload)
+        self.closing = False
 
         self.sig_r, self.sig_w = os.pipe()
         os.set_blocking(self.sig_w, False)
@@ -475,7 +500,8 @@ class _ZygoteServer:
                 creds = conn.getsockopt(
                     socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
                 )
-                if struct.unpack("3i", creds)[1] != os.getuid():
+                peer_pid, peer_uid, _ = struct.unpack("3i", creds)
+                if peer_uid != os.getuid():
                     return
                 msg, fds = _recv_msg(conn, _MAX_FDS)
                 if msg["op"] == "fork":
@@ -488,15 +514,20 @@ class _ZygoteServer:
                     if isinstance(env, str):
                         _send_msg(conn, {"error": env})
                     else:
-                        self._fork(conn, env, fds)
-            except (OSError, EOFError, ValueError, KeyError, struct.error) as e:
+                        self._fork(conn, env, fds, peer_pid)
+                elif msg["op"] == "descendants":
+                    _send_msg(conn, {"pids": self._descendants(msg["pids"])})
+            except Exception as e:
+                # A malformed request must not take down the zygote.
                 logger.debug("Dropped a zygote request: %r", e)
             finally:
                 for fd in fds:
                     with contextlib.suppress(OSError):
                         os.close(fd)
 
-    def _fork(self, conn: socket.socket, env: dict[str, str], fds: list[int]) -> None:
+    def _fork(
+        self, conn: socket.socket, env: dict[str, str], fds: list[int], requester: int
+    ) -> None:
         data_r, status_w, tracker_fd, *passed = fds
         _flush_std_streams()
         pid = os.fork()
@@ -522,6 +553,7 @@ class _ZygoteServer:
         # The caller closes the other fds.
         fds.remove(status_w)
         self.children[pid] = status_w
+        self.requesters[pid] = requester
         try:
             _send_msg(conn, {"pid": pid})
             write_signed(status_w, pid)
@@ -560,6 +592,18 @@ class _ZygoteServer:
         gc.enable()
         return spawn._main(data_r, os.dup(data_r))  # type: ignore[attr-defined]
 
+    def _descendants(self, pids: list[int]) -> list[int]:
+        found: set[int] = set()
+        owners = set(pids)
+        while owners:
+            owners = {
+                pid
+                for pid, requester in self.requesters.items()
+                if requester in owners and pid not in found
+            }
+            found |= owners
+        return sorted(found)
+
     def _reap(self) -> None:
         while True:
             try:
@@ -568,6 +612,7 @@ class _ZygoteServer:
                 return
             if pid == 0:
                 return
+            self.requesters.pop(pid, None)
             if (fd := self.children.pop(pid, None)) is not None:
                 with contextlib.suppress(OSError):
                     write_signed(fd, os.waitstatus_to_exitcode(status))
