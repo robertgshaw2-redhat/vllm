@@ -75,12 +75,11 @@ def _mock_async_llm_dependencies(monkeypatch: pytest.MonkeyPatch):
         "load_stat_logger_plugin_factories",
         MagicMock(return_value=[]),
     )
+    # Imported by AsyncLLM when it builds its frontend.
     monkeypatch.setattr(
-        async_llm_module,
-        "renderer_from_config",
-        MagicMock(return_value=renderer),
+        "vllm.renderers.renderer_from_config", MagicMock(return_value=renderer)
     )
-    monkeypatch.setattr(async_llm_module, "InputProcessor", MagicMock())
+    monkeypatch.setattr("vllm.v1.engine.input_processor.InputProcessor", MagicMock())
     monkeypatch.setattr(async_llm_module, "OutputProcessor", MagicMock())
     monkeypatch.setattr(
         async_llm_module.EngineCoreClient,

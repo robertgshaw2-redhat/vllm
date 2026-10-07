@@ -34,7 +34,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest, PauseMode
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import DeferredRenderer, EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -116,14 +116,16 @@ class LLMEngine:
         # engine startup, and then starts the MM warmup (the why is in
         # BaseRenderer.start_mm_warmup_in_background). InprocClient takes no
         # renderer, so MM warmup stays inside renderer.warmup() there.
+        frontend = DeferredRenderer(init_frontend)
         self.engine_core = EngineCoreClient.make_client(
             multiprocess_mode=multiprocess_mode,
             asyncio_mode=False,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
-            renderer=init_frontend if multiprocess_mode else init_frontend(),
+            renderer=frontend if multiprocess_mode else frontend.get(),
         )
+        frontend.get()  # Already built, unless the client did not build it.
         self._profile_session_active = False
 
         self.logger_manager: StatLoggerManager | None = None

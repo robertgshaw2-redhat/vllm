@@ -49,7 +49,7 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import DeferredRenderer, EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
@@ -196,6 +196,7 @@ class AsyncLLM(EngineClient):
         # starts the frontend MM warmup (the why is in
         # BaseRenderer.start_mm_warmup_in_background). The warmup is joined
         # by reset_mm_cache / warmup / shutdown.
+        frontend = DeferredRenderer(init_frontend)
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -203,8 +204,9 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
-            renderer=init_frontend,
+            renderer=frontend,
         )
+        frontend.get()  # Already built, unless the client did not build it.
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
