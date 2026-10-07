@@ -52,6 +52,10 @@ _SUBCOMMAND_MODULES = {
 }
 
 
+# Subcommands that start an engine, and so may use the zygote.
+_ENGINE_SUBCOMMANDS = ("serve", "run-batch")
+
+
 def main():
     if maybe_run_omni():
         return
@@ -59,26 +63,31 @@ def main():
     import os
     from importlib import import_module
 
+    from vllm.utils.gc_utils import gc_paused_for_imports
+
     subcommand = sys.argv[1] if len(sys.argv) > 1 else None
     if (
-        subcommand == "serve"
-        and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver"
+        subcommand in _ENGINE_SUBCOMMANDS
+        and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "zygote"
+        and not any(a in ("-h", "--help") or a.startswith("--help=") for a in sys.argv)
     ):
-        from vllm.utils.system_utils import start_forkserver_early
+        # First, so that the zygote's imports overlap with ours.
+        from vllm.utils import zygote
 
-        start_forkserver_early()
+        zygote.start()
 
-    from vllm.entrypoints.serve.utils.api_utils import (
-        VLLM_SUBCMD_PARSER_EPILOG,
-        cli_env_setup,
-    )
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    with gc_paused_for_imports():
+        from vllm.entrypoints.serve.utils.api_utils import (
+            VLLM_SUBCMD_PARSER_EPILOG,
+            cli_env_setup,
+        )
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-    if subcommand in _SUBCOMMAND_MODULES:
-        module_names = [_SUBCOMMAND_MODULES[subcommand]]
-    else:
-        module_names = list(dict.fromkeys(_SUBCOMMAND_MODULES.values()))
-    CMD_MODULES = [import_module(name) for name in module_names]
+        if subcommand in _SUBCOMMAND_MODULES:
+            module_names = [_SUBCOMMAND_MODULES[subcommand]]
+        else:
+            module_names = list(dict.fromkeys(_SUBCOMMAND_MODULES.values()))
+        CMD_MODULES = [import_module(name) for name in module_names]
 
     if sys.argv[1:2] != ["snapshot"]:
         cli_env_setup()

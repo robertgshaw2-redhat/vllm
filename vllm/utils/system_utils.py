@@ -140,10 +140,12 @@ def _maybe_force_spawn():
     if "--numa-bind" in sys.argv:
         reasons.append("NUMA binding requires spawn method")
 
-    if cuda_is_initialized():
-        reasons.append("CUDA is initialized")
-    elif xpu_is_initialized():
-        reasons.append("XPU is initialized")
+    # Zygote children do not inherit this process's state.
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "zygote":
+        if cuda_is_initialized():
+            reasons.append("CUDA is initialized")
+        elif xpu_is_initialized():
+            reasons.append("XPU is initialized")
 
     if in_wsl():
         reasons.append("WSL is detected and NVML is not compatible with fork")
@@ -173,46 +175,11 @@ def get_mp_context():
     # of whether spawn was already set.
     _sync_visible_devices_env_vars()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
-    if mp_method == "forkserver":
-        _reuse_inherited_forkserver()
+    if mp_method == "zygote":
+        from vllm.utils import zygote
+
+        return zygote.get_context()
     return multiprocessing.get_context(mp_method)
-
-
-# Modules the forkserver imports once so that EngineCore and worker processes
-# forked from it start with them already loaded.
-FORKSERVER_PRELOAD = [
-    "__main__",
-    "vllm.v1.engine.core",
-    "vllm.v1.executor.multiproc_executor",
-    "vllm.v1.executor.uniproc_executor",
-    "vllm.v1.worker.gpu_worker",
-    "vllm.v1.worker.gpu_model_runner",
-]
-
-
-def start_forkserver_early() -> None:
-    """Start the forkserver now, so that its preload imports overlap with the
-    rest of this process's startup instead of delaying the first child."""
-    import multiprocessing.forkserver as forkserver
-
-    multiprocessing.set_forkserver_preload(FORKSERVER_PRELOAD)
-    forkserver.ensure_running()
-
-
-def _reuse_inherited_forkserver() -> None:
-    """Let a process forked by the forkserver fork its own children through
-    the same server. Stock multiprocessing would start a second forkserver
-    and re-import everything, since only the server's creator tracks its pid.
-    """
-    import multiprocessing.forkserver as forkserver
-
-    server = forkserver._forkserver
-    if (
-        server._forkserver_pid is None
-        and server._forkserver_address is not None
-        and server._forkserver_alive_fd is not None
-    ):
-        server.ensure_running = lambda: None  # type: ignore[method-assign]
 
 
 def set_process_title(
