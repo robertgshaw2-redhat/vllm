@@ -167,7 +167,7 @@ def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
     return t.as_strided(t.shape, strides)
 
 
-def lazy_torch_compile(fn: Callable | None = None, **compile_kwargs: Any):
+def lazy_torch_compile(fn: Callable | None = None, /, **compile_kwargs: Any):
     """Drop-in for a module-level `@torch.compile(...)` that defers the
     `torch.compile` call to the first invocation.
 

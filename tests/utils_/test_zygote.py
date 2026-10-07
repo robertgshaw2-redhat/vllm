@@ -24,7 +24,7 @@ def _report(conn) -> None:
         {
             "pid": os.getpid(),
             "ppid": os.getppid(),
-            "parent": mp.parent_process().pid,
+            "parent": mp.parent_process().pid,  # type: ignore[union-attr]
             "name": mp.current_process().name,
             "env": os.environ.get("ZYGOTE_TEST"),
             "hash_randomization": sys.flags.hash_randomization,
@@ -138,7 +138,8 @@ def test_fork_hazard_names_threads():
     thread = threading.Thread(target=stop.wait, name="preload-helper")
     thread.start()
     try:
-        assert "preload-helper" in zygote._fork_hazard()
+        hazard = zygote._fork_hazard()
+        assert hazard is not None and "preload-helper" in hazard
     finally:
         stop.set()
         thread.join()

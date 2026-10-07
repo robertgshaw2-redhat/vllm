@@ -85,6 +85,22 @@ class ZygoteUnavailableError(RuntimeError):
     """The zygote cannot serve a request."""
 
 
+def _close_fds(*fds: int) -> None:
+    for fd in fds:
+        os.close(fd)
+
+
+def _interpreter_flags() -> list[str]:
+    """Command-line flags reproducing this interpreter's settings."""
+    return subprocess._args_from_interpreter_flags()  # type: ignore[attr-defined]
+
+
+def _flush_std_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            stream.flush()
+
+
 # Client side.
 
 
@@ -112,7 +128,7 @@ class _ZygotePopen(popen_fork.Popen):
         return len(self._fds) - 1
 
     def _launch(self, process_obj: process.BaseProcess) -> None:
-        prep_data = spawn.get_preparation_data(process_obj._name)
+        prep_data = spawn.get_preparation_data(process_obj.name)
         buf = io.BytesIO()
         context.set_spawning_popen(self)
         try:
@@ -130,7 +146,9 @@ class _ZygotePopen(popen_fork.Popen):
             with socket.socket(socket.AF_UNIX) as sock:
                 sock.settimeout(_TIMEOUT_S)
                 sock.connect(self._address)
-                fds = [data_r, status_w, resource_tracker.getfd(), *self._fds]
+                tracker_fd = resource_tracker.getfd()
+                assert tracker_fd is not None
+                fds = [data_r, status_w, tracker_fd, *self._fds]
                 _send_msg(sock, {"op": "fork", "env": dict(os.environ)}, fds)
                 reply = _recv_msg(sock)[0]
         except (OSError, EOFError, ValueError) as e:
@@ -145,7 +163,7 @@ class _ZygotePopen(popen_fork.Popen):
 
         self.sentinel = status_r
         parent_w = os.dup(data_w)
-        self.finalizer = util.Finalize(self, util.close_fds, (parent_w, self.sentinel))
+        self.finalizer = util.Finalize(self, _close_fds, (parent_w, self.sentinel))
         with open(data_w, "wb", closefd=True) as f:
             f.write(buf.getbuffer())
         self.pid = read_signed(self.sentinel)
@@ -248,8 +266,7 @@ def start(preload: Sequence[str] | None = None) -> str:
             )
             try:
                 _zygote = subprocess.Popen(
-                    [spawn.get_executable(), *util._args_from_interpreter_flags()]
-                    + ["-c", cmd],
+                    [spawn.get_executable(), *_interpreter_flags(), "-c", cmd],
                     pass_fds=(listener.fileno(), alive_r),
                     stdin=subprocess.DEVNULL,
                 )
@@ -485,7 +502,7 @@ class _ZygoteServer:
 
     def _fork(self, conn: socket.socket, env: dict[str, str], fds: list[int]) -> None:
         data_r, status_w, tracker_fd, *passed = fds
-        util._flush_std_streams()
+        _flush_std_streams()
         pid = os.fork()
         if pid == 0:
             code = 1
