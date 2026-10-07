@@ -5,7 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
@@ -27,7 +27,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.math_utils import cdiv
@@ -78,6 +77,9 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
+if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalRegistry
+
 logger = init_logger(__name__)
 
 
@@ -89,7 +91,7 @@ class Scheduler(SchedulerInterface):
         structured_output_manager: StructuredOutputManager,
         block_size: int,
         hash_block_size: int | None = None,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        mm_registry: "MultiModalRegistry | None" = None,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
@@ -249,9 +251,14 @@ class Scheduler(SchedulerInterface):
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = vllm_config.model_config.supports_multimodal_inputs
-        mm_budget = (
-            MultiModalBudget(vllm_config, mm_registry) if supports_mm_inputs else None
-        )
+        mm_budget = None
+        if supports_mm_inputs:
+            if mm_registry is None:
+                # Imported here: the registry pulls in the HF processor stack.
+                from vllm.multimodal import MULTIMODAL_REGISTRY
+
+                mm_registry = MULTIMODAL_REGISTRY
+            mm_budget = MultiModalBudget(vllm_config, mm_registry)
 
         # NOTE: Text-only encoder-decoder models are implemented as
         # multi-modal models for convenience

@@ -3,6 +3,7 @@
 """Map Humming schemas and handle shared checkpoint quantization settings."""
 
 import dataclasses
+import functools
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -21,7 +22,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
     from vllm.utils.humming import (
@@ -51,10 +51,17 @@ def humming_update_schema_hadamard_block_size(
     return dataclasses.replace(weight_schema, hadamard_block_size=block_size)
 
 
-if has_humming():
+@functools.cache
+def humming_dtype_maps() -> tuple[
+    dict["humming_dtypes.DataType", Any], dict["humming_dtypes.DataType", torch.dtype]
+]:
+    """Humming dtype -> (quantized dtype, scale dtype) maps.
+
+    Built on first use: importing humming starts background JIT builds.
+    """
     from vllm.utils.humming import dtypes as humming_dtypes
 
-    _HUMMING_TO_QUANT_DTYPE: dict[humming_dtypes.DataType, Any] = {
+    to_quant: dict[humming_dtypes.DataType, Any] = {
         humming_dtypes.float4e0m3: FP4_DTYPE,
         humming_dtypes.float4e2m1: FP4_DTYPE,
         humming_dtypes.float6e2m3: scalar_types.float6_e2m3f,
@@ -72,13 +79,14 @@ if has_humming():
         humming_dtypes.uint7: torch.uint8,
     }
 
-    _HUMMING_TO_SCALE_DTYPE: dict[humming_dtypes.DataType, torch.dtype] = {
+    to_scale: dict[humming_dtypes.DataType, torch.dtype] = {
         humming_dtypes.float8e8m0: MXFP_SCALE_DTYPE,
         humming_dtypes.float8e4m3: FP8_DTYPE,
         humming_dtypes.float16: torch.float16,
         humming_dtypes.bfloat16: torch.bfloat16,
         humming_dtypes.float32: torch.float32,
     }
+    return to_quant, to_scale
 
 
 logger = init_logger(__name__)
@@ -114,10 +122,11 @@ def weight_schema_to_quant_key(
                 param_dtype = torch.float16
 
     schema = schema.to_humming_schema(param_dtype)
-    dtype = _HUMMING_TO_QUANT_DTYPE[schema.b_dtype]
+    to_quant, to_scale = humming_dtype_maps()
+    dtype = to_quant[schema.b_dtype]
 
     if schema.bs_dtype is not None:
-        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.bs_dtype]
+        scale_dtype = to_scale[schema.bs_dtype]
     else:
         scale_dtype = torch.float32
 
@@ -166,7 +175,8 @@ def input_schema_to_quant_key(
     mode = schema.input_quant_mode
     if mode == InputQuantizationMode.Disabled:
         return None
-    dtype = _HUMMING_TO_QUANT_DTYPE[schema.a_dtype]
+    to_quant, to_scale = humming_dtype_maps()
+    dtype = to_quant[schema.a_dtype]
 
     gs = schema.input_scale_group_size
     group_shape = GroupShape(row=1, col=gs) if gs > 0 else GroupShape.PER_TOKEN
@@ -178,7 +188,7 @@ def input_schema_to_quant_key(
     # float32 scale. Getting this right lets a grouped FP8 activation match
     # kFp8Dynamic128Sym instead of an unmatchable uint8-scaled key.
     if schema.input_scale_dtype is not None:
-        scale_dtype = _HUMMING_TO_SCALE_DTYPE[schema.input_scale_dtype]
+        scale_dtype = to_scale[schema.input_scale_dtype]
     elif gs == 16:
         scale_dtype = FP8_DTYPE
     elif gs == 32:
@@ -211,6 +221,7 @@ def input_schema_to_quant_key(
 
 def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
+    from vllm.utils.humming import dtypes as humming_dtypes
 
     if key is None:
         return HummingInputSchema(input_quant_mode=InputQuantizationMode.Disabled)
@@ -218,10 +229,11 @@ def quant_key_to_input_schema(key: QuantKey | None) -> "HummingInputSchema":
     if not key.symmetric:
         raise ValueError("Humming input quantization must be symmetric")
 
-    quant_dtypes = {value: dtype for dtype, value in _HUMMING_TO_QUANT_DTYPE.items()}
+    to_quant, to_scale = humming_dtype_maps()
+    quant_dtypes = {value: dtype for dtype, value in to_quant.items()}
     quant_dtypes[FP4_DTYPE] = humming_dtypes.float4e2m1
     quant_dtypes[FP8_DTYPE] = humming_dtypes.float8e4m3
-    scale_dtypes = {value: dtype for dtype, value in _HUMMING_TO_SCALE_DTYPE.items()}
+    scale_dtypes = {value: dtype for dtype, value in to_scale.items()}
     if key.dtype not in quant_dtypes or key.scale.dtype not in scale_dtypes:
         raise ValueError(f"Unsupported Humming input or scale dtype: {key}")
 
@@ -265,6 +277,7 @@ def check_and_fallback_input_schema(
     allow_fallback: bool = True,
 ) -> "HummingInputSchema":
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
+    from vllm.utils.humming import dtypes as humming_dtypes
 
     capability = current_platform.get_device_capability()
     assert capability is not None
