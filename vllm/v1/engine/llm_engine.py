@@ -26,7 +26,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import renderer_from_config
+from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -95,23 +95,26 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        self.renderer = renderer = renderer_from_config(self.vllm_config)
+        def init_frontend() -> BaseRenderer:
+            self.renderer = renderer = renderer_from_config(self.vllm_config)
 
-        # Convert EngineInput --> EngineCoreRequest.
-        self.input_processor = InputProcessor(self.vllm_config, renderer)
+            # Convert EngineInput --> EngineCoreRequest.
+            self.input_processor = InputProcessor(self.vllm_config, renderer)
 
-        # Converts EngineCoreOutputs --> RequestOutput.
-        self.output_processor = OutputProcessor(
-            renderer.tokenizer,
-            log_stats=self.log_stats,
-            stream_interval=self.vllm_config.scheduler_config.stream_interval,
-            tracing_enabled=tracing_endpoint is not None,
-        )
+            # Converts EngineCoreOutputs --> RequestOutput.
+            self.output_processor = OutputProcessor(
+                renderer.tokenizer,
+                log_stats=self.log_stats,
+                stream_interval=self.vllm_config.scheduler_config.stream_interval,
+                tracing_enabled=tracing_endpoint is not None,
+            )
+            return renderer
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
-        # Hand the renderer to the client. In multiprocess mode the client
-        # starts the MM warmup only after engine-core fork (the why is in
-        # BaseRenderer.start_mm_warmup_in_background); InprocClient takes no
+        # In multiprocess mode the client calls init_frontend once the
+        # engine-core processes have started, so tokenizer loading overlaps
+        # engine startup, and then starts the MM warmup (the why is in
+        # BaseRenderer.start_mm_warmup_in_background). InprocClient takes no
         # renderer, so MM warmup stays inside renderer.warmup() there.
         self.engine_core = EngineCoreClient.make_client(
             multiprocess_mode=multiprocess_mode,
@@ -119,7 +122,7 @@ class LLMEngine:
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=self.log_stats,
-            renderer=renderer,
+            renderer=init_frontend if multiprocess_mode else init_frontend(),
         )
         self._profile_session_active = False
 

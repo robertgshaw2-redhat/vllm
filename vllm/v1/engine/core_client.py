@@ -100,7 +100,7 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        renderer: "BaseRenderer | None" = None,
+        renderer: "BaseRenderer | Callable[[], BaseRenderer] | None" = None,
     ) -> "EngineCoreClient":
         # renderer is passed through to the multiprocess clients, which start
         # the frontend MM warmup (renderer.start_mm_warmup_in_background) once

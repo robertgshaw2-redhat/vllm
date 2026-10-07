@@ -18,22 +18,33 @@ CONTRACTS = {
     # Lazy import `cv2` to avoid bothering users who only use text models.
     # `cv2` can easily mess up the environment.
     "vllm": ["torch", "torch._inductor.async_compile", "cv2"],
-    # The API server starts the engine before importing its HTTP stack.
+    # The API server starts the engine before importing its HTTP stack and
+    # the multimodal processors.
     "vllm.entrypoints.cli.serve": [
+        "aiohttp",
+        "cv2",
         "fastapi",
-        "uvicorn",
         "openai",
         "torch._dynamo",
+        "torchvision",
+        "uvicorn",
         "vllm.renderers.base",
         "vllm.v1.engine.core",
     ],
-    # EngineCore neither compiles nor serves HTTP; only multimodal models need
-    # the multimodal registry.
+    # EngineCore neither compiles, serves HTTP nor decodes media, and only
+    # multimodal models need the multimodal registry. humming starts
+    # background processes and threads when imported.
     "vllm.v1.engine.core": [
+        "aiohttp",
+        "cv2",
         "fastapi",
+        "humming",
         "openai",
         "torch._dynamo",
         "torch._inductor",
+        "torchcodec",
+        "torchvision",
+        "uvicorn",
         "vllm.multimodal.registry",
     ],
 }
