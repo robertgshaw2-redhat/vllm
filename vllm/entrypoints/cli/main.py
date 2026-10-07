@@ -74,7 +74,10 @@ def main():
         # First, so that the zygote's imports overlap with ours.
         from vllm.utils import zygote
 
-        zygote.start()
+        try:
+            zygote.start()
+        except zygote.ZygoteUnavailableError as e:
+            logger.warning("%s; processes will be spawned.", e)
 
     with gc_paused_for_imports():
         from vllm.entrypoints.serve.utils.cli_utils import (

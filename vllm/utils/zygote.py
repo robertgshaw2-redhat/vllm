@@ -241,60 +241,51 @@ def start(preload: Sequence[str] | None = None) -> str:
     Returns:
         The zygote's socket address.
 
+    Raises:
+        ZygoteUnavailableError: If the zygote could not be started.
+
     """
     global _zygote, _alive_w
     with _start_lock:
         if _zygote is not None and _zygote.poll() is None:
             return os.environ[ADDRESS_ENV]
-        sock_dir = tempfile.mkdtemp(prefix="vllm-zygote-")
-        atexit.register(shutil.rmtree, sock_dir, ignore_errors=True)
-        address = os.path.join(sock_dir, "sock")
-        os.environ[ADDRESS_ENV] = address
         alive_r, alive_w = os.pipe()
-        with socket.socket(socket.AF_UNIX) as listener:
-            listener.bind(address)
-            listener.listen(64)
-            # The zygote starts with the GC off (it never collects; children
-            # freeze its heap) and ignoring Ctrl-C, like the stdlib forkserver.
-            cmd = (
-                "import gc, signal, sys; gc.disable(); "
-                "signal.signal(signal.SIGINT, signal.SIG_IGN); "
-                f"sys.path[:] = {sys.path!r}; "
-                "from vllm.utils.zygote import _serve; "
-                f"_serve({listener.fileno()}, {alive_r}, {sock_dir!r}, "
-                f"{None if preload is None else list(preload)!r})"
-            )
-            try:
+        sock_dir = None
+        try:
+            sock_dir = tempfile.mkdtemp(prefix="vllm-zygote-")
+            address = os.path.join(sock_dir, "sock")
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(address)
+                listener.listen(64)
+                # The zygote starts with the GC off (it never collects;
+                # children freeze its heap) and ignoring Ctrl-C, like the
+                # stdlib forkserver.
+                cmd = (
+                    "import gc, signal, sys; gc.disable(); "
+                    "signal.signal(signal.SIGINT, signal.SIG_IGN); "
+                    f"sys.path[:] = {sys.path!r}; "
+                    "from vllm.utils.zygote import _serve; "
+                    f"_serve({listener.fileno()}, {alive_r}, {sock_dir!r}, "
+                    f"{None if preload is None else list(preload)!r})"
+                )
                 _zygote = subprocess.Popen(
                     [spawn.get_executable(), *_interpreter_flags(), "-c", cmd],
                     pass_fds=(listener.fileno(), alive_r),
                     stdin=subprocess.DEVNULL,
+                    env={**os.environ, ADDRESS_ENV: address},
                 )
-            except BaseException:
-                os.close(alive_w)
-                raise
-            finally:
-                os.close(alive_r)
+        except OSError as e:
+            os.close(alive_w)
+            if sock_dir is not None:
+                shutil.rmtree(sock_dir, ignore_errors=True)
+            raise ZygoteUnavailableError(f"could not start a zygote ({e!r})") from e
+        finally:
+            os.close(alive_r)
+        atexit.register(shutil.rmtree, sock_dir, ignore_errors=True)
         _alive_w = alive_w
+        os.environ[ADDRESS_ENV] = address
         logger.debug("Started zygote pid %d at %s", _zygote.pid, address)
         return address
-
-
-def preload(modules: Sequence[str]) -> None:
-    """Ask the zygote serving this process tree to import `modules` too.
-
-    No-op if there is none. Imports happen asynchronously, between requests.
-    """
-    address = os.environ.get(ADDRESS_ENV)
-    if not _SUPPORTED or not address:
-        return
-    try:
-        with socket.socket(socket.AF_UNIX) as sock:
-            sock.settimeout(_TIMEOUT_S)
-            sock.connect(address)
-            _send_msg(sock, {"op": "preload", "modules": list(modules)})
-    except OSError as e:
-        logger.debug("Could not ask the zygote to preload %s: %r", modules, e)
 
 
 # Wire format: a length-prefixed JSON message, with any fds attached to the
@@ -480,9 +471,7 @@ class _ZygoteServer:
                 if struct.unpack("3i", creds)[1] != os.getuid():
                     return
                 msg, fds = _recv_msg(conn, _MAX_FDS)
-                if msg["op"] == "preload":
-                    self.pending.extend(msg["modules"])
-                elif msg["op"] == "fork":
+                if msg["op"] == "fork":
                     env = self.hazard or _child_env(
                         self.start_env,
                         dict(os.environ),
@@ -519,6 +508,9 @@ class _ZygoteServer:
                 sys.excepthook(*sys.exc_info())
                 sys.stderr.flush()
             finally:
+                # Exit handlers run when a spawned process exits, but not on
+                # os._exit.
+                atexit._run_exitfuncs()
                 os._exit(code)
         # The caller closes the other fds.
         fds.remove(status_w)

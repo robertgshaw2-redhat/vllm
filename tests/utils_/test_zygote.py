@@ -3,10 +3,12 @@
 """The zygote must start processes that behave like spawned ones, and fall
 back to spawn whenever it cannot."""
 
+import atexit
 import multiprocessing as mp
 import os
 import signal
 import sys
+import tempfile
 import threading
 import time
 
@@ -39,6 +41,10 @@ def _exit(code: int) -> None:
 
 def _sleep() -> None:
     time.sleep(60)
+
+
+def _touch_at_exit(path: str) -> None:
+    atexit.register(lambda: open(path, "w").close())
 
 
 def _report_grandchild(conn) -> None:
@@ -96,6 +102,14 @@ def test_exit_code_and_terminate(ctx):
     assert proc.exitcode == -signal.SIGTERM
 
 
+def test_exit_handlers_run_as_in_spawned_process(ctx, tmp_path):
+    marker = tmp_path / "exited"
+    proc = ctx.Process(target=_touch_at_exit, args=(str(marker),))
+    proc.start()
+    proc.join()
+    assert proc.exitcode == 0 and marker.exists()
+
+
 def test_grandchild_is_forked_by_the_same_zygote(ctx):
     child = _run(ctx, _report)
     grandchild = _run(ctx, _report_grandchild)
@@ -114,6 +128,18 @@ def test_changed_exec_time_variable_falls_back_to_spawn(ctx, monkeypatch):
 def test_unreachable_zygote_falls_back_to_spawn(ctx, monkeypatch, tmp_path):
     monkeypatch.setenv(zygote.ADDRESS_ENV, str(tmp_path / "missing.sock"))
     assert _run(ctx, _report)["ppid"] == os.getpid()
+
+
+def test_start_failure_is_reported(monkeypatch, tmp_path):
+    # Unix socket paths are limited to about 100 bytes.
+    long_dir = tmp_path / ("d" * 100)
+    long_dir.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(long_dir))
+    monkeypatch.setattr(zygote, "_zygote", None)
+    address = os.environ.get(zygote.ADDRESS_ENV)
+    with pytest.raises(zygote.ZygoteUnavailableError):
+        zygote.start()
+    assert os.environ.get(zygote.ADDRESS_ENV) == address
 
 
 def test_child_env():
