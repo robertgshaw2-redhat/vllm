@@ -16,8 +16,9 @@ usual `Popen` (pid, sentinel and exit code), following the protocol of
 `multiprocessing.forkserver`.
 
 Requests the zygote cannot serve faithfully fall back to `spawn`: when it is
-unreachable, when preloading started a thread or initialized CUDA, or when an
-environment variable that preloading depended on has changed since.
+unreachable, when preloading started a thread or initialized CUDA, when an
+environment variable that preloading depended on has changed since, or when
+the requester's processes would run another Python executable.
 
 Enabled with `VLLM_WORKER_MULTIPROC_METHOD=zygote`.
 """
@@ -150,7 +151,12 @@ class _ZygotePopen(popen_fork.Popen):
                 tracker_fd = resource_tracker.getfd()
                 assert tracker_fd is not None
                 fds = [data_r, status_w, tracker_fd, *self._fds]
-                _send_msg(sock, {"op": "fork", "env": dict(os.environ)}, fds)
+                request = {
+                    "op": "fork",
+                    "env": dict(os.environ),
+                    "executable": os.fsdecode(spawn.get_executable()),
+                }
+                _send_msg(sock, request, fds)
                 reply = _recv_msg(sock)[0]
         except (OSError, EOFError, ValueError) as e:
             reply = {"error": f"no zygote at {self._address} ({e!r})"}
@@ -505,12 +511,7 @@ class _ZygoteServer:
                     return
                 msg, fds = _recv_msg(conn, _MAX_FDS)
                 if msg["op"] == "fork":
-                    env = self.hazard or _child_env(
-                        self.start_env,
-                        dict(os.environ),
-                        msg["env"],
-                        (*_EXEC_TIME_ENV, *self.env_reads),
-                    )
+                    env = self._environment_for(msg)
                     if isinstance(env, str):
                         _send_msg(conn, {"error": env})
                     else:
@@ -524,6 +525,23 @@ class _ZygoteServer:
                 for fd in fds:
                     with contextlib.suppress(OSError):
                         os.close(fd)
+
+    def _environment_for(self, request: dict) -> dict[str, str] | str:
+        """The environment of the child to fork for `request`, or why there is
+        none."""
+        if self.hazard is not None:
+            return self.hazard
+        # The child runs our interpreter, not the one the requester's spawned
+        # processes would run (e.g. another virtualenv's).
+        executable = os.fsdecode(spawn.get_executable())
+        if request["executable"] != executable:
+            return f"it runs {executable}, not {request['executable']}"
+        return _child_env(
+            self.start_env,
+            dict(os.environ),
+            request["env"],
+            (*_EXEC_TIME_ENV, *self.env_reads),
+        )
 
     def _fork(
         self, conn: socket.socket, env: dict[str, str], fds: list[int], requester: int

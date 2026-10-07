@@ -5,6 +5,7 @@ back to spawn whenever it cannot."""
 
 import atexit
 import multiprocessing as mp
+import multiprocessing.spawn
 import os
 import signal
 import sys
@@ -157,6 +158,14 @@ def test_changed_exec_time_variable_falls_back_to_spawn(ctx, monkeypatch):
     info = _run(ctx, _report)
     assert info["ppid"] == os.getpid()
     assert info["hash_randomization"] == 0
+
+
+def test_other_interpreter_falls_back_to_spawn(ctx, monkeypatch):
+    # The same interpreter under another path, as another virtualenv would be.
+    executable = os.path.join(os.path.dirname(sys.executable), ".", "python3")
+    assert os.path.exists(executable)
+    monkeypatch.setattr(multiprocessing.spawn, "_python_exe", os.fsencode(executable))
+    assert _run(ctx, _report)["ppid"] == os.getpid()
 
 
 def test_unreachable_zygote_falls_back_to_spawn(ctx, monkeypatch, tmp_path):

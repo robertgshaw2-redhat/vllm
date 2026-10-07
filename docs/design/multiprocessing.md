@@ -168,7 +168,8 @@ Unlike `forkserver`, the zygote:
   thread, and CUDA not initialized;
 - gives each child the requester's environment at request time, and falls back
   to `spawn` when a variable that preloading read, or that only takes effect at
-  process start (e.g. `LD_PRELOAD`), has changed since it started;
+  process start (e.g. `LD_PRELOAD`), has changed since it started, or when the
+  requester would spawn another Python executable (e.g. another virtualenv's);
 - serves requests between preloaded modules, so EngineCore can start before
   the worker modules are loaded.
 
