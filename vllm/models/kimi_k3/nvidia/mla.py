@@ -92,6 +92,7 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
+    lazy_torch_compile,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -114,7 +115,7 @@ logger = init_logger(__name__)
 _GATE_MULTI_STREAM_TOKEN_THRESHOLD = 512
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(backend=current_platform.simple_compile_backend)
 def _gate_sigmoid_mul(attn_out: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
     """Apply the sigmoid output gate to a precomputed gate projection."""
     return attn_out * gate.sigmoid()

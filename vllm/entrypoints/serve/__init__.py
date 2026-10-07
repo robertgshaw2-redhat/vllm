@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from fastapi import FastAPI
+from typing import TYPE_CHECKING, Any
 
 from vllm.logger import init_logger
 
-from .exception_handling.error_response import create_error_response
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+    from .exception_handling.error_response import create_error_response
 
 logger = init_logger(__name__)
 
@@ -16,7 +19,17 @@ __all__ = [
 ]
 
 
-def register_vllm_serve_api_routers(app: FastAPI):
+def __getattr__(name: str) -> Any:
+    # Imported on first access, so that light submodules (e.g. utils.cli_utils)
+    # do not pull in FastAPI.
+    if name == "create_error_response":
+        from .exception_handling.error_response import create_error_response
+
+        return create_error_response
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def register_vllm_serve_api_routers(app: "FastAPI"):
     from .instrumentator import register_instrumentator_api_routers
 
     register_instrumentator_api_routers(app)
@@ -40,7 +53,7 @@ def register_vllm_serve_api_routers(app: FastAPI):
     attach_tokenize_router(app)
 
 
-def register_vllm_dev_api_routers(app: FastAPI):
+def register_vllm_dev_api_routers(app: "FastAPI"):
     logger.warning(
         "SECURITY WARNING: Development endpoints are enabled! "
         "This should NOT be used in production!"

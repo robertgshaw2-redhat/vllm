@@ -16,6 +16,7 @@ from PIL import Image
 from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
 
+from . import media
 from .inputs import (
     BatchedTensorInputs,
     MultiModalFeatureSpec,
@@ -24,13 +25,7 @@ from .inputs import (
     MultiModalSharedField,
     nested_tensors_equal,
 )
-from .media import (
-    AudioMediaIO,
-    ImageMediaIO,
-    MediaConnector,
-    MediaWithBytes,
-    VideoMediaIO,
-)
+from .media.base import MediaWithBytes
 
 if TYPE_CHECKING:
     import torch.types
@@ -45,7 +40,7 @@ def encode_audio_base64(
     format: str = "WAV",
 ) -> str:
     """Encode audio as base64."""
-    audio_io = AudioMediaIO()
+    audio_io = media.AudioMediaIO()
     return audio_io.encode_base64((audio, sampling_rate), audio_format=format)
 
 
@@ -72,7 +67,7 @@ def encode_image_base64(
     By default, the image is converted into RGB format before being encoded.
     Pass `image_mode=None` to keep the original image mode.
     """
-    image_io = ImageMediaIO(image_mode=image_mode)
+    image_io = media.ImageMediaIO(image_mode=image_mode)
     return image_io.encode_base64(image, image_format=format)
 
 
@@ -97,8 +92,8 @@ def encode_video_base64(
     *,
     format: str = "JPEG",
 ) -> str:
-    image_io = ImageMediaIO()
-    video_io = VideoMediaIO(image_io)
+    image_io = media.ImageMediaIO()
+    video_io = media.VideoMediaIO(image_io)
     return video_io.encode_base64(frames, video_format=format)
 
 
@@ -341,7 +336,7 @@ def fetch_audio(
 
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
-    media_connector = MediaConnector(
+    media_connector = media.MediaConnector(
         media_io_kwargs=media_io_kwargs,
         allowed_local_media_path="/",
     )
@@ -362,7 +357,7 @@ def fetch_image(
 
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
-    media_connector = MediaConnector(
+    media_connector = media.MediaConnector(
         media_io_kwargs=media_io_kwargs,
         allowed_local_media_path="/",
     )
@@ -383,7 +378,7 @@ def fetch_video(
 
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
-    media_connector = MediaConnector(
+    media_connector = media.MediaConnector(
         media_io_kwargs=media_io_kwargs,
         allowed_local_media_path="/",
     )

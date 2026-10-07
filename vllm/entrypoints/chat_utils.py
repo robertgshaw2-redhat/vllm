@@ -71,6 +71,10 @@ from vllm.renderers.embed_utils import (
     safe_load_prompt_embeds,
     safe_load_prompt_embeds_async,
 )
+from vllm.transformers_utils.chat_templates.options import (  # noqa: F401
+    ChatTemplateContentFormatOption,
+    validate_chat_template,
+)
 from vllm.transformers_utils.processor import get_video_processor_cls_name
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of, is_list_of_numbers
@@ -425,9 +429,6 @@ class ConversationMessage(TypedDict, total=False):
     task: str | None
     """Model-specific task marker. Currently passed through for DeepSeek V4."""
 
-
-# Passed in by user
-ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 
 # After resolving "auto"
 ChatTemplateContentFormat = Literal["string", "openai"]
@@ -1451,41 +1452,6 @@ class ChatTemplateConfig:
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
     trust_request_chat_template: bool = False
     trust_request_mm_kwargs: bool = False
-
-
-def validate_chat_template(chat_template: Path | str | None):
-    """Raises if the provided chat template appears invalid."""
-    if chat_template is None:
-        return
-
-    elif isinstance(chat_template, Path) and not chat_template.exists():
-        raise FileNotFoundError("the supplied chat template path doesn't exist")
-
-    elif isinstance(chat_template, str):
-        JINJA_CHARS = "{}\n"
-        if (
-            not any(c in chat_template for c in JINJA_CHARS)
-            and not Path(chat_template).exists()
-        ):
-            # Try to find the template in the built-in templates directory
-            from vllm.transformers_utils.chat_templates.registry import (
-                CHAT_TEMPLATES_DIR,
-            )
-
-            builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
-            if not builtin_template_path.exists():
-                raise VLLMValidationError(
-                    f"The supplied chat template string ({chat_template}) "
-                    f"appears path-like, but doesn't exist! "
-                    f"Tried: {chat_template} and {builtin_template_path}",
-                    parameter="chat_template",
-                )
-
-    else:
-        raise VLLMValidationError(
-            f"{type(chat_template)} is not a valid chat template type",
-            parameter="chat_template",
-        )
 
 
 def _load_chat_template(

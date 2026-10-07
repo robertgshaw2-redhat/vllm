@@ -229,8 +229,8 @@ _torch_copy_ = torch.Tensor.copy_
 # Once ``Tensor.to`` is replaced below, Dynamo sees the saved C++ descriptor
 # through this module global instead of as a recognized tensor method. Put the
 # descriptor behind a weak-referenceable Python callable so ``allow_in_graph``
-# can admit it and the downstream compiler can lower the original operation.
-@torch.compiler.allow_in_graph
+# (applied in `_install_copy_checkers`) can admit it and the downstream
+# compiler can lower the original operation.
 def _torch_to_in_graph(self, *args, **kwargs):
     return _torch_to(self, *args, **kwargs)
 
@@ -361,6 +361,8 @@ def _install_copy_checkers() -> None:
     if _copy_checkers_installed:
         return
     _copy_checkers_installed = True
+    # Not a decorator: `allow_in_graph` imports Dynamo, which takes seconds.
+    torch.compiler.allow_in_graph(_torch_to_in_graph)
     torch.Tensor.to = _checked_to  # type: ignore[method-assign]
     torch.Tensor.cuda = _checked_cuda  # type: ignore[method-assign]
     torch.Tensor.copy_ = _checked_copy_  # type: ignore[method-assign]

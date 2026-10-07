@@ -17,11 +17,6 @@ from huggingface_hub import constants
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PreTrainedConfig
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
-from transformers.models.auto.image_processing_auto import get_image_processor_config
-from transformers.models.auto.modeling_auto import (
-    MODEL_MAPPING_NAMES,
-)
-from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
@@ -917,6 +912,9 @@ def get_config(
 
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:
+        # Deferred: modeling_auto imports torch._dynamo via masking_utils.
+        from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
+
         if config.model_type not in MODEL_MAPPING_NAMES:
             logger.warning(
                 "Model config does not have a top-level 'architectures' field: "
@@ -1229,6 +1227,11 @@ def get_hf_image_processor_config(
     # ModelScope does not provide an interface for image_processor
     if envs.VLLM_USE_MODELSCOPE:
         return dict()
+    # Deferred: transformers' image utils import torchvision (and Dynamo).
+    from transformers.models.auto.image_processing_auto import (
+        get_image_processor_config,
+    )
+
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
     )
@@ -1304,6 +1307,8 @@ def try_get_tokenizer_config(
     trust_remote_code: bool,
     revision: str | None = None,
 ) -> dict[str, Any] | None:
+    from transformers.models.auto.tokenization_auto import get_tokenizer_config
+
     try:
         return get_tokenizer_config(
             pretrained_model_name_or_path,

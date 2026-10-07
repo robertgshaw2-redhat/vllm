@@ -12,7 +12,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, lazy_torch_compile
 
 logger = init_logger(__name__)
 
@@ -983,7 +983,7 @@ _OPS_REGISTERED = False
 
 class xpu_ops:
     @staticmethod
-    @torch.compile
+    @lazy_torch_compile
     def dynamic_per_token_int8_quant_ref(
         input: torch.Tensor, use_sym_quant: bool, bits: int
     ):

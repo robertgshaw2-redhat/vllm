@@ -1540,32 +1540,47 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
 
         input_bytes = cloudpickle.dumps((fn, output_filepath))
 
-        # cannot use `sys.executable __file__` here because the script
-        # contains relative imports
-        returned = subprocess.run(
-            _SUBPROCESS_COMMAND, input=input_bytes, capture_output=True
-        )
+        from vllm.utils import zygote
 
-        # check if the subprocess is successful
-        try:
-            returned.check_returncode()
-        except Exception as e:
-            # wrap raised exception to provide more information
-            raise RuntimeError(
-                f"Error raised in subprocess:\n{returned.stderr.decode()}"
-            ) from e
+        if (ctx := zygote.get_running_context()) is not None:
+            # A zygote child starts with vLLM imported, unlike a new interpreter.
+            proc = ctx.Process(target=_run, args=(input_bytes,), name="ModelInspector")
+            proc.start()
+            proc.join()
+            if proc.exitcode != 0:
+                raise RuntimeError(
+                    f"Model inspection subprocess failed (exit code "
+                    f"{proc.exitcode}); see the error logged above."
+                )
+        else:
+            # cannot use `sys.executable __file__` here because the script
+            # contains relative imports
+            returned = subprocess.run(
+                _SUBPROCESS_COMMAND, input=input_bytes, capture_output=True
+            )
+
+            # check if the subprocess is successful
+            try:
+                returned.check_returncode()
+            except Exception as e:
+                # wrap raised exception to provide more information
+                raise RuntimeError(
+                    f"Error raised in subprocess:\n{returned.stderr.decode()}"
+                ) from e
 
         with open(output_filepath, "rb") as f:
             return pickle.load(f)
 
 
-def _run() -> None:
+def _run(input_bytes: bytes | None = None) -> None:
     # Setup plugins
     from vllm.plugins import load_general_plugins
 
     load_general_plugins()
 
-    fn, output_file = pickle.loads(sys.stdin.buffer.read())
+    if input_bytes is None:
+        input_bytes = sys.stdin.buffer.read()
+    fn, output_file = pickle.loads(input_bytes)
 
     result = fn()
 

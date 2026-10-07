@@ -5,8 +5,6 @@ from dataclasses import field
 
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
-from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import cached_tokenizer_from_config
 
 
 @config
@@ -75,6 +73,11 @@ class ReasoningConfig:
         ):
             self._enabled = True
             return  # Already initialized
+
+        # Config is imported by every process; these pull in the tokenizer
+        # and parser stacks (transformers, openai), so import them on use.
+        from vllm.reasoning import ReasoningParserManager
+        from vllm.tokenizers import cached_tokenizer_from_config
 
         tokenizer = cached_tokenizer_from_config(model_config=model_config)
         reasoning_start_str = self.reasoning_start_str

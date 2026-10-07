@@ -42,7 +42,7 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 from vllm.triton_utils import HAS_TRITON
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, lazy_torch_compile
 
 logger = init_logger(__name__)
 
@@ -68,7 +68,7 @@ def get_rope_shape_decorate(func):
 
 
 @get_rope_shape_decorate
-@torch.compile(
+@lazy_torch_compile(
     dynamic=True,
     backend=current_platform.simple_compile_backend,
     disable=current_platform.simple_compile_backend == "tpu",
