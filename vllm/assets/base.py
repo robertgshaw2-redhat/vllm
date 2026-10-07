@@ -5,7 +5,6 @@ from functools import lru_cache
 from pathlib import Path
 
 import vllm.envs as envs
-from vllm.connections import global_http_connection
 
 VLLM_S3_BUCKET_URL = "https://vllm-public-assets.s3.us-west-2.amazonaws.com"
 
@@ -28,6 +27,9 @@ def get_vllm_public_assets(filename: str, s3_prefix: str | None = None) -> Path:
 
     asset_path = asset_directory / filename
     if not asset_path.exists():
+        # Deferred: vllm.connections imports aiohttp.
+        from vllm.connections import global_http_connection
+
         if s3_prefix is not None:
             filename = s3_prefix + "/" + filename
         global_http_connection.download_file(

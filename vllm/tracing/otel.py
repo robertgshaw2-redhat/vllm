@@ -3,6 +3,7 @@
 
 import atexit
 import functools
+import importlib.util
 import inspect
 import os
 import traceback
@@ -15,22 +16,13 @@ from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
 
 logger = init_logger(__name__)
 
+# Only the OpenTelemetry API is imported here. The SDK and the OTLP exporters
+# (~300 modules, including gRPC) are imported when a tracer is initialized,
+# so processes running with tracing off do not pay for them.
 try:
     from opentelemetry import trace
     from opentelemetry.context.context import Context
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-        OTLPSpanExporter as OTLPGrpcExporter,
-    )
-    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-        OTLPSpanExporter as OTLPHttpExporter,
-    )
     from opentelemetry.propagate import inject
-    from opentelemetry.sdk.environment_variables import (
-        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
-    )
-    from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (
         SpanKind,  # noqa: F401
         Tracer,
@@ -39,6 +31,10 @@ try:
     from opentelemetry.trace.propagation.tracecontext import (
         TraceContextTextMapPropagator,
     )
+
+    for _module in ("opentelemetry.sdk", "opentelemetry.exporter.otlp"):
+        if importlib.util.find_spec(_module) is None:
+            raise ImportError(f"No module named {_module!r}")
 
     _IS_OTEL_AVAILABLE = True
     otel_import_error_traceback = None
@@ -49,7 +45,6 @@ except ImportError:
     Context = Any  # type: ignore
     Tracer = Any  # type: ignore
     inject = None  # type: ignore
-    Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
 
 
@@ -78,6 +73,10 @@ def init_otel_tracer(
     resource_attrs["vllm.process_id"] = str(os.getpid())
     if extra_attributes:
         resource_attrs.update(extra_attributes)
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
     resource = Resource.create(resource_attrs)
 
     trace_provider = TracerProvider(resource=resource)
@@ -92,10 +91,22 @@ def init_otel_tracer(
 
 
 def get_span_exporter(endpoint):
+    from opentelemetry.sdk.environment_variables import (
+        OTEL_EXPORTER_OTLP_TRACES_PROTOCOL,
+    )
+
     protocol = os.environ.get(OTEL_EXPORTER_OTLP_TRACES_PROTOCOL, "grpc")
     if protocol == "grpc":
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+            OTLPSpanExporter as OTLPGrpcExporter,
+        )
+
         exporter = OTLPGrpcExporter(endpoint=endpoint, insecure=True)
     elif protocol == "http/protobuf":
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter as OTLPHttpExporter,
+        )
+
         exporter = OTLPHttpExporter(endpoint=endpoint)
     else:
         raise ValueError(f"Unsupported OTLP protocol '{protocol}' is configured")
