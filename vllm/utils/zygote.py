@@ -235,8 +235,8 @@ def start(preload: Sequence[str] | None = None) -> str:
     its children have.
 
     Args:
-        preload: Modules to import before forking. Defaults to the EngineCore
-            and executor modules plus the current platform's worker modules.
+        preload: Modules to import before forking. Defaults to the EngineCore,
+            executor and GPU worker modules.
 
     Returns:
         The zygote's socket address.
@@ -327,17 +327,21 @@ def _recv_msg(sock: socket.socket, maxfds: int = 0) -> tuple[dict, list[int]]:
 # Zygote side.
 
 
-def _default_preload() -> list[str]:
+def _default_preload() -> list[str] | None:
+    """The modules to preload, or None if the platform is not supported.
+
+    Other platforms configure their workers' OpenMP runtime through variables
+    that it reads when loaded, which a forked child cannot honor.
+    """
     from vllm.platforms import current_platform
 
-    modules = list(_ENGINE_MODULES)
-    if current_platform.is_cuda_alike():
-        modules += ["vllm.v1.worker.gpu_worker", "vllm.v1.worker.gpu_model_runner"]
-    elif current_platform.is_xpu():
-        modules.append("vllm.v1.worker.xpu_worker")
-    elif current_platform.is_cpu():
-        modules.append("vllm.v1.worker.cpu_worker")
-    return modules
+    if not current_platform.is_cuda_alike():
+        return None
+    return [
+        *_ENGINE_MODULES,
+        "vllm.v1.worker.gpu_worker",
+        "vllm.v1.worker.gpu_model_runner",
+    ]
 
 
 def _fork_hazard() -> str | None:
@@ -395,9 +399,12 @@ class _ZygoteServer:
         decorate_logs("Zygote")
         self.listener = socket.socket(fileno=listener_fd)
         self.alive_fd = alive_fd
-        self.pending = deque(_default_preload() if preload is None else preload)
         self.children: dict[int, int] = {}  # pid -> write end of status pipe
         self.hazard: str | None = None
+        if preload is None and (preload := _default_preload()) is None:
+            self.hazard = "it supports only CUDA and ROCm"
+            preload = []
+        self.pending = deque(preload)
         self.closing = False
         # Preloaded modules were imported under this environment, and may
         # have captured the vLLM variables they read.

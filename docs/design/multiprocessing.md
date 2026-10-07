@@ -176,7 +176,9 @@ Unlike `forkserver`, the zygote:
 else; other entrypoints start it on first use. Requests it cannot serve,
 including when it is not running, fall back to `spawn`. NUMA binding
 (`--numa-bind`, which wraps the spawned executable with `numactl`) and Ray
-still force `spawn`. The zygote is Linux-only.
+still force `spawn`. The zygote supports Linux with CUDA or ROCm: other
+platforms configure their workers' OpenMP runtime through variables it reads
+when loaded, which a forked child cannot honor.
 
 ## Alternatives Considered
 
