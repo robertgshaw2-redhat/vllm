@@ -532,6 +532,18 @@ class _ZygoteServer:
         envs.__getattr__ = self.envs_getattr  # type: ignore[assignment]
         os.environ.clear()
         os.environ.update(env)
+        # Torch sized its intra-op thread pool from the zygote's environment
+        # when the zygote imported it; a spawned process sizes it from its own
+        # (e.g. the share of CPUs EngineCore picks for each worker).
+        torch = sys.modules.get("torch")
+        num_threads = env.get("OMP_NUM_THREADS")
+        if (
+            torch is not None
+            and num_threads is not None
+            and num_threads != self.start_env.get("OMP_NUM_THREADS")
+        ):
+            with contextlib.suppress(ValueError):
+                torch.set_num_threads(int(num_threads))
         global _inherited_fds
         _inherited_fds = passed
         resource_tracker._resource_tracker._fd = tracker_fd  # type: ignore[attr-defined]

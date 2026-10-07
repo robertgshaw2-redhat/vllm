@@ -43,6 +43,12 @@ def _sleep() -> None:
     time.sleep(60)
 
 
+def _report_num_threads(conn) -> None:
+    import torch
+
+    conn.send(torch.get_num_threads())
+
+
 def _touch_at_exit(path: str) -> None:
     atexit.register(lambda: open(path, "w").close())
 
@@ -71,7 +77,7 @@ def _run(ctx, target, *args, **kwargs) -> dict:
 @pytest.fixture(scope="module")
 def ctx():
     old = os.environ.pop(zygote.ADDRESS_ENV, None)
-    zygote.start(preload=["json"])
+    zygote.start(preload=["torch"])
     yield zygote.get_context()
     if old is None:
         os.environ.pop(zygote.ADDRESS_ENV, None)
@@ -100,6 +106,12 @@ def test_exit_code_and_terminate(ctx):
     proc.terminate()
     proc.join(10)
     assert proc.exitcode == -signal.SIGTERM
+
+
+def test_child_sizes_torch_threads_from_its_environment(ctx, monkeypatch):
+    # The zygote imported torch under its own environment.
+    monkeypatch.setenv("OMP_NUM_THREADS", "3")
+    assert _run(ctx, _report_num_threads) == 3
 
 
 def test_exit_handlers_run_as_in_spawned_process(ctx, tmp_path):
