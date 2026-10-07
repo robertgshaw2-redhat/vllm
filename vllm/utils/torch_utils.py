@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import functools
 import importlib.metadata
 import os
 import random
@@ -164,6 +165,33 @@ def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
     if not changed:
         return t
     return t.as_strided(t.shape, strides)
+
+
+def lazy_torch_compile(fn: Callable | None = None, **compile_kwargs: Any):
+    """Drop-in for a module-level `@torch.compile(...)` that defers the
+    `torch.compile` call to the first invocation.
+
+    Decorating eagerly imports Dynamo and Inductor (~2-3s), which every process
+    that merely imports the module would pay. Inside an outer compiled region
+    the undecorated function is called so Dynamo inlines it, as it does for a
+    nested `torch.compile`.
+    """
+
+    def decorator(fn: Callable) -> Callable:
+        compiled: Callable | None = None
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            nonlocal compiled
+            if torch.compiler.is_compiling():
+                return fn(*args, **kwargs)
+            if compiled is None:
+                compiled = torch.compile(fn, **compile_kwargs)
+            return compiled(*args, **kwargs)
+
+        return wrapper
+
+    return decorator if fn is None else decorator(fn)
 
 
 @contextlib.contextmanager

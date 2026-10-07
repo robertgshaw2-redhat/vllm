@@ -39,7 +39,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.profiler.wrapper import TorchProfilerWrapper, create_frontend_profiler
-from vllm.renderers import renderer_from_config
+from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
@@ -156,11 +156,6 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        self.renderer = renderer = renderer_from_config(self.vllm_config)
-
-        # Convert EngineInput --> EngineCoreRequest.
-        self.input_processor = InputProcessor(self.vllm_config, renderer)
-
         self.admission_stats = (
             SharedAdmissionStats(client_addresses, client_count, client_index)
             if client_addresses is not None
@@ -168,18 +163,26 @@ class AsyncLLM(EngineClient):
             else None
         )
 
-        # Converts EngineCoreOutputs --> RequestOutput.
-        self.output_processor = OutputProcessor(
-            renderer.tokenizer,
-            log_stats=self.log_stats,
-            stream_interval=self.vllm_config.scheduler_config.stream_interval,
-            tracing_enabled=tracing_endpoint is not None,
-            admission_stats=self.admission_stats,
-        )
+        def init_frontend() -> BaseRenderer:
+            self.renderer = renderer = renderer_from_config(self.vllm_config)
+
+            # Convert EngineInput --> EngineCoreRequest.
+            self.input_processor = InputProcessor(self.vllm_config, renderer)
+
+            # Converts EngineCoreOutputs --> RequestOutput.
+            self.output_processor = OutputProcessor(
+                renderer.tokenizer,
+                log_stats=self.log_stats,
+                stream_interval=self.vllm_config.scheduler_config.stream_interval,
+                tracing_enabled=tracing_endpoint is not None,
+                admission_stats=self.admission_stats,
+            )
+            return renderer
 
         # EngineCore (starts the engine in background process).
-        # Hand the renderer to the client so it can start the frontend MM
-        # warmup only after engine-core fork (the why is in
+        # The client calls init_frontend once the engine-core processes have
+        # started, so tokenizer loading overlaps engine startup, and then
+        # starts the frontend MM warmup (the why is in
         # BaseRenderer.start_mm_warmup_in_background). The warmup is joined
         # by reset_mm_cache / warmup / shutdown.
         self.engine_core = EngineCoreClient.make_async_mp_client(
@@ -189,7 +192,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
-            renderer=renderer,
+            renderer=init_frontend,
         )
 
         # Loggers.

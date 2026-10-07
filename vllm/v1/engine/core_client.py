@@ -141,7 +141,7 @@ class EngineCoreClient(ABC):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | None = None,
+        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
     ) -> "AsyncMPClient":
         parallel_config = vllm_config.parallel_config
         client_args = (
@@ -580,6 +580,13 @@ class ElasticScalingCache:
     pending_notifications: dict[EEPNotificationType, set[int]]
 
 
+def _run_into_future(fn: Callable[[], Any], future: Future) -> None:
+    try:
+        future.set_result(fn())
+    except BaseException as e:
+        future.set_exception(e)
+
+
 class MPClient(EngineCoreClient):
     """MPClient: base client for multi-proc EngineCore.
     EngineCore runs in a background process busy loop, getting
@@ -599,10 +606,13 @@ class MPClient(EngineCoreClient):
         executor_class: type[Executor],
         log_stats: bool,
         client_addresses: dict[str, Any] | None = None,
-        renderer: BaseRenderer | None = None,
+        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
     ):
         self.vllm_config = vllm_config
-        self._renderer: BaseRenderer | None = renderer
+        # A factory is invoked once the engine-core processes have started,
+        # so that frontend init (tokenizer load etc.) overlaps engine startup.
+        self._renderer: BaseRenderer | Callable[[], BaseRenderer] | None = renderer
+        self._frontend_init: Future[BaseRenderer] | None = None
         self._effective_attention_block_sizes: set[int | None] = set()
         self._kv_event_sources: dict[int, KVEventsConfig] = {}
 
@@ -771,6 +781,7 @@ class MPClient(EngineCoreClient):
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
 
+            self._join_frontend_init()
             success = True
         finally:
             if not success:
@@ -807,8 +818,30 @@ class MPClient(EngineCoreClient):
         # externally managed). Overlap the frontend MM warmup with the
         # engine-core model load. This is a no-op when no renderer was passed
         # (e.g. text-only serving or tests).
-        if self._renderer is not None:
-            self._renderer.start_mm_warmup_in_background()
+        renderer = self._renderer
+        if renderer is not None and not isinstance(renderer, BaseRenderer):
+            # Build the frontend on a thread: the engine-core handshake is
+            # served by this thread while the engines start up.
+            def init_frontend() -> BaseRenderer:
+                built = renderer()
+                built.start_mm_warmup_in_background()
+                return built
+
+            self._frontend_init = Future()
+            self._frontend_init_thread = Thread(
+                target=_run_into_future,
+                args=(init_frontend, self._frontend_init),
+                name="FrontendInit",
+                daemon=True,
+            )
+            self._frontend_init_thread.start()
+        elif renderer is not None:
+            renderer.start_mm_warmup_in_background()
+
+    def _join_frontend_init(self) -> None:
+        if self._frontend_init is not None:
+            self._renderer = self._frontend_init.result()
+            self._frontend_init = None
 
     def start_engine_core_monitor(self):
         """Start a monitor thread for engine core processes."""
@@ -933,7 +966,7 @@ class SyncMPClient(MPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        renderer: BaseRenderer | None = None,
+        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
     ):
         super().__init__(
             asyncio_mode=False,
@@ -1128,7 +1161,7 @@ class AsyncMPClient(MPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | None = None,
+        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
     ):
         super().__init__(
             asyncio_mode=True,
@@ -1441,7 +1474,7 @@ class DPAsyncMPClient(AsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | None = None,
+        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
     ):
         self.current_wave = 0
 
@@ -1625,7 +1658,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        renderer: BaseRenderer | None = None,
+        renderer: BaseRenderer | Callable[[], BaseRenderer] | None = None,
     ):
         self.client_count = client_count
 

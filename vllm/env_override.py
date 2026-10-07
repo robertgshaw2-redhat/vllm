@@ -182,6 +182,39 @@ os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 # debug layout (see https://github.com/vllm-project/vllm/issues/41410).
 os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
+
+def _run_after_import(module_name: str, fn) -> None:
+    """Call `fn()` right after `module_name` is first imported, or now if it
+    already is. Keeps `import vllm` from importing Inductor (~2-3s) just to
+    patch it in processes that never compile."""
+    import sys
+
+    if module_name in sys.modules:
+        fn()
+        return
+
+    import importlib.abc
+
+    class _PatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != module_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                fn()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _PatchFinder())
+
+
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
 # ===================================================
@@ -787,33 +820,7 @@ def _patch_cpp_indirect_assert_if_needed():
     if not is_torch_equal_or_newer("2.11.0") or is_torch_equal_or_newer("2.12.0.dev"):
         return
 
-    import sys
-
-    target_name = "torch._inductor.codegen.cpp"
-    if target_name in sys.modules:
-        _apply_cpp_indirect_assert_patch()
-        return
-
-    import importlib.abc
-
-    class _CppCodegenPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_cpp_indirect_assert_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _CppCodegenPatchFinder())
+    _run_after_import("torch._inductor.codegen.cpp", _apply_cpp_indirect_assert_patch)
 
 
 _patch_cpp_indirect_assert_if_needed()
@@ -905,16 +912,14 @@ def _patch_inductor_fallback_allow_list() -> None:
     #   from torch._inductor.lowering import FALLBACK_ALLOW_LIST
     # so we also need to overwrite the local binding in the graph module if
     # it has already been imported.
-    try:
-        from torch._inductor import graph as _graph
+    import sys
 
-        if hasattr(_graph, "FALLBACK_ALLOW_LIST"):
-            _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
-    except ImportError:
-        pass
+    _graph = sys.modules.get("torch._inductor.graph")
+    if _graph is not None and hasattr(_graph, "FALLBACK_ALLOW_LIST"):
+        _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
 
 
-_patch_inductor_fallback_allow_list()
+_run_after_import("torch._inductor.lowering", _patch_inductor_fallback_allow_list)
 
 
 def _apply_inductor_pattern_matcher_patch() -> None:
@@ -932,41 +937,12 @@ def _apply_inductor_pattern_matcher_patch() -> None:
     pattern_matcher.fallback_node_due_to_unsupported_type = fallback_for_builtin
 
 
-def _patch_inductor_pattern_matcher() -> None:
-    """Apply the backport when Inductor imports its pattern matcher."""
-    import sys
-
-    target_name = "torch._inductor.pattern_matcher"
-    if target_name in sys.modules:
-        _apply_inductor_pattern_matcher_patch()
-        return
-
-    import importlib.abc
-
-    class _PatternMatcherPatchFinder(importlib.abc.MetaPathFinder):
-        def find_spec(self, fullname, path, target=None):
-            if fullname != target_name:
-                return None
-            sys.meta_path.remove(self)
-            spec = importlib.util.find_spec(fullname)
-            if spec is None or spec.loader is None:
-                return None
-            original_exec = spec.loader.exec_module
-
-            def _exec_then_patch(module):
-                original_exec(module)
-                _apply_inductor_pattern_matcher_patch()
-
-            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
-            return spec
-
-    sys.meta_path.insert(0, _PatternMatcherPatchFinder())
-
-
 # Remove once the minimum supported torch includes
 # https://github.com/pytorch/pytorch/pull/196013.
 if not is_torch_equal_or_newer("2.16.0.dev"):
-    _patch_inductor_pattern_matcher()
+    _run_after_import(
+        "torch._inductor.pattern_matcher", _apply_inductor_pattern_matcher_patch
+    )
 
 # ============================================================
 # Triton Autotuner determinism
