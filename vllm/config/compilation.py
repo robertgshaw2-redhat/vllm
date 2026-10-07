@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
+import os
+import sys
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import field, fields
@@ -31,6 +33,15 @@ else:
     VllmConfig = object
 
 logger = init_logger(__name__)
+
+
+def _inductor_deterministic() -> bool:
+    """Inductor's `deterministic` setting, read without importing Inductor:
+    `vllm serve` builds this config to make its argument parser."""
+    if (inductor_config := sys.modules.get("torch._inductor.config")) is not None:
+        return getattr(inductor_config, "deterministic", False)
+    # Inductor's default, from torch/_inductor/config.py.
+    return os.environ.get("TORCHINDUCTOR_DETERMINISTIC") == "1"
 
 
 class CompilationMode(enum.IntEnum):
@@ -1007,14 +1018,12 @@ class CompilationConfig:
             # (fixme @boyuan) combo kernel does not support cpu yet.
             and not current_platform.is_cpu()
         ):
-            from torch._inductor import config as inductor_config
-
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
 
             deterministic = self.inductor_compile_config.get(
-                "deterministic", getattr(inductor_config, "deterministic", False)
+                "deterministic", _inductor_deterministic()
             )
             self.inductor_compile_config["benchmark_combo_kernel"] = not deterministic
 
