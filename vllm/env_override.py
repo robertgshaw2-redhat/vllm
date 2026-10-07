@@ -224,10 +224,14 @@ def _run_after_import(module_name: str, fn) -> None:
     import importlib.abc
 
     class _PatchFinder(importlib.abc.MetaPathFinder):
+        # Stays in sys.meta_path once used: removing it while another thread
+        # iterates sys.meta_path would make that thread skip a finder.
+        used = False
+
         def find_spec(self, fullname, path, target=None):
-            if fullname != module_name:
+            if self.used or fullname != module_name:
                 return None
-            sys.meta_path.remove(self)
+            self.used = True
             spec = importlib.util.find_spec(fullname)
             if spec is None or spec.loader is None:
                 return None

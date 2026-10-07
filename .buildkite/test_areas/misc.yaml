@@ -536,6 +536,7 @@ steps:
   - tests/test_cmake_utils.py
   - tests/test_connections.py
   - tests/test_embedded_commit.py
+  - tests/test_env_override.py
   - tests/test_envs.py
   - tests/test_force_first_config.py
   - tests/test_fxgraphcache_pickle_patch.py
@@ -579,6 +580,7 @@ steps:
   - pytest -v -s test_cmake_utils.py
   - pytest -v -s test_connections.py
   - pytest -v -s test_embedded_commit.py
+  - pytest -v -s test_env_override.py
   - pytest -v -s test_envs.py
   - pytest -v -s test_force_first_config.py
   - pytest -v -s test_fxgraphcache_pickle_patch.py
