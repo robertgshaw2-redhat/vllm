@@ -52,15 +52,33 @@ _SUBCOMMAND_MODULES = {
 }
 
 
+# Subcommands that start an engine, and so may use the zygote.
+_ENGINE_SUBCOMMANDS = ("serve", "run-batch")
+
+
 def main():
     if maybe_run_omni():
         return
 
+    import os
     from importlib import import_module
 
     from vllm.utils.gc_utils import gc_paused_for_imports
 
     subcommand = sys.argv[1] if len(sys.argv) > 1 else None
+    if (
+        subcommand in _ENGINE_SUBCOMMANDS
+        and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "zygote"
+        and not any(a in ("-h", "--help") or a.startswith("--help=") for a in sys.argv)
+    ):
+        # First, so that the zygote's imports overlap with ours.
+        from vllm.utils import zygote
+
+        try:
+            zygote.start()
+        except zygote.ZygoteUnavailableError as e:
+            logger.warning("%s; processes will be spawned.", e)
+
     with gc_paused_for_imports():
         from vllm.entrypoints.serve.utils.cli_utils import (
             VLLM_SUBCMD_PARSER_EPILOG,
