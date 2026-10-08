@@ -140,10 +140,12 @@ def _maybe_force_spawn():
     if "--numa-bind" in sys.argv:
         reasons.append("NUMA binding requires spawn method")
 
-    if cuda_is_initialized():
-        reasons.append("CUDA is initialized")
-    elif xpu_is_initialized():
-        reasons.append("XPU is initialized")
+    # Zygote children do not inherit this process's state.
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "zygote":
+        if cuda_is_initialized():
+            reasons.append("CUDA is initialized")
+        elif xpu_is_initialized():
+            reasons.append("XPU is initialized")
 
     if in_wsl():
         reasons.append("WSL is detected and NVML is not compatible with fork")
@@ -173,6 +175,10 @@ def get_mp_context():
     # of whether spawn was already set.
     _sync_visible_devices_env_vars()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
+    if mp_method == "zygote":
+        from vllm.utils import zygote
+
+        return zygote.get_context()
     return multiprocessing.get_context(mp_method)
 
 
@@ -210,16 +216,24 @@ def kill_process_tree(pid: int):
         pid (int): Process ID of the parent process
 
     """
+    from vllm.utils import zygote
+
     try:
         parent = psutil.Process(pid)
     except psutil.NoSuchProcess:
         return
 
-    # Get all children recursively
-    children = parent.children(recursive=True)
+    # Get all children recursively, including the processes the zygote forked
+    # for them, whose parent is the zygote.
+    children = {child.pid: child for child in parent.children(recursive=True)}
+    for forked_pid in zygote.descendants([pid, *children]):
+        with contextlib.suppress(psutil.NoSuchProcess):
+            forked = psutil.Process(forked_pid)
+            for child in (forked, *forked.children(recursive=True)):
+                children.setdefault(child.pid, child)
 
     # Send SIGKILL to all children first
-    for child in children:
+    for child in children.values():
         with contextlib.suppress(ProcessLookupError):
             logger.warning(
                 "[shutdown] force killing sub process %s pid %d",

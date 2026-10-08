@@ -145,6 +145,42 @@ RuntimeError:
         section in https://docs.python.org/3/library/multiprocessing.html
 ```
 
+## The `zygote` Method
+
+`VLLM_WORKER_MULTIPROC_METHOD=zygote` is the `forkserver`-like process manager
+described under [Future Work](#future-work), built for startup time: with
+`spawn`, every EngineCore and worker process re-imports vLLM, which takes
+seconds per process on the startup critical path.
+
+The zygote is a single-threaded process started from a fresh interpreter. It
+imports the EngineCore, executor and worker modules once, then forks each
+EngineCore and worker process on request. A zygote child behaves like a spawned
+process: it gets the requester's environment, `sys.path`, `sys.argv` and working
+directory, re-imports the requester's `__main__` module, and runs the `Process`
+object the requester sends it. Its OS parent is the zygote, but the requester
+owns it through the usual `Process` API (pid, sentinel and exit code), as with
+`forkserver`. Processes started by a zygote child, such as the workers that
+EngineCore starts, are forked by the same zygote.
+
+Unlike `forkserver`, the zygote:
+
+- checks that preloading left it safe to fork: no thread besides the main
+  thread, and CUDA not initialized;
+- gives each child the requester's environment at request time, and falls back
+  to `spawn` when a variable that preloading read, or that only takes effect at
+  process start (e.g. `LD_PRELOAD`), has changed since it started, or when the
+  requester would spawn another Python executable (e.g. another virtualenv's);
+- serves requests between preloaded modules, so EngineCore can start before
+  the worker modules are loaded.
+
+`vllm serve` and `vllm run-batch` start the zygote before importing anything
+else; other entrypoints start it on first use. Requests it cannot serve,
+including when it is not running, fall back to `spawn`. NUMA binding
+(`--numa-bind`, which wraps the spawned executable with `numactl`) and Ray
+still force `spawn`. The zygote supports Linux with CUDA or ROCm: other
+platforms configure their workers' OpenMP runtime through variables it reads
+when loaded, which a forked child cannot honor.
+
 ## Alternatives Considered
 
 ### Detect if a `__main__` guard is present
@@ -183,7 +219,8 @@ that works around these challenges.
 
 1. We could implement something `forkserver`-like, but have the process manager
    be something we initially launch by running our own subprocess and a custom
-   entrypoint for worker management (launch a `vllm-manager` process).
+   entrypoint for worker management (launch a `vllm-manager` process). This is
+   now available as [the `zygote` method](#the-zygote-method).
 
 2. We can explore other libraries that may better suit our needs. Examples to
    consider:
