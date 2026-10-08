@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import importlib
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -8,7 +9,7 @@ import signal
 import socket
 import tempfile
 from argparse import Namespace
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -21,15 +22,35 @@ from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
 
-from ..app import build_app
-from ..launcher import serve_http, setup_server
-from ..utils.server_utils import get_uvicorn_log_config
-from .app_state import init_app_state
+from ..server_setup import setup_server
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger("vllm.entrypoints.launchers.api_server.entry")
+
+# The HTTP app is only needed once the engine is ready: the engine client
+# imports it in the background while the engine starts, instead of the server
+# importing it before starting the engine.
+_APP_MODULES = (
+    "vllm.entrypoints.launchers.app",
+    "vllm.entrypoints.launchers.launcher",
+    "vllm.entrypoints.launchers.utils.server_utils",
+    "vllm.entrypoints.launchers.api_server.app_state",
+)
+
+_LAZY_ATTRS = {
+    "build_app": "vllm.entrypoints.launchers.app",
+    "serve_http": "vllm.entrypoints.launchers.launcher",
+    "get_uvicorn_log_config": "vllm.entrypoints.launchers.utils.server_utils",
+    "init_app_state": "vllm.entrypoints.launchers.api_server.app_state",
+}
+
+
+def __getattr__(name: str) -> Any:
+    if name in _LAZY_ATTRS:
+        return getattr(importlib.import_module(_LAZY_ATTRS[name]), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @asynccontextmanager
@@ -38,6 +59,7 @@ async def build_async_engine_client(
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
+    frontend_preload: Sequence[str] = (),
 ) -> AsyncIterator[EngineClient]:
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
         # The executor is expected to be mp.
@@ -62,6 +84,7 @@ async def build_async_engine_client(
         engine_args,
         usage_context=usage_context,
         client_config=client_config,
+        frontend_preload=frontend_preload,
     ) as engine:
         yield engine
 
@@ -72,6 +95,7 @@ async def build_async_engine_client_from_engine_args(
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
+    frontend_preload: Sequence[str] = (),
 ) -> AsyncIterator[EngineClient]:
     """Create EngineClient, either:
         - in-process using the AsyncLLMEngine Directly
@@ -101,6 +125,7 @@ async def build_async_engine_client_from_engine_args(
             client_addresses=client_config,
             client_count=client_count,
             client_index=client_index,
+            frontend_preload=frontend_preload,
         )
 
         # Don't keep the dummy data in memory
@@ -124,6 +149,11 @@ async def build_and_serve(
 
     Returns the shutdown task for the caller to await.
     """
+    from ..app import build_app
+    from ..launcher import serve_http
+    from ..utils.server_utils import get_uvicorn_log_config
+    from .app_state import init_app_state
+
     # Get uvicorn log config (from file or with endpoint filter)
     log_config = get_uvicorn_log_config(args)
     if log_config is not None:
@@ -188,6 +218,7 @@ async def run_server_worker(
     async with build_async_engine_client(
         args,
         client_config=client_config,
+        frontend_preload=_APP_MODULES,
     ) as engine_client:
         shutdown_task = await build_and_serve(
             engine_client, listen_address, sock, args, **uvicorn_kwargs
@@ -202,7 +233,7 @@ async def run_server_worker(
 def main():
     import uvloop
 
-    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    from vllm.entrypoints.serve.utils.cli_utils import cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     from ..cli_args import (

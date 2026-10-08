@@ -35,6 +35,7 @@ from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
 from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.torch_utils import lazy_torch_compile
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
@@ -51,7 +52,7 @@ _INDEXER_COMPILE = dict(
 )
 
 
-@torch.compile(**_INDEXER_COMPILE)
+@lazy_torch_compile(**_INDEXER_COMPILE)
 def _fused_indexer_k_norm(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, dim: int, eps: float
 ) -> torch.Tensor:
@@ -59,7 +60,7 @@ def _fused_indexer_k_norm(
     return F.layer_norm(x.float(), (dim,), weight, bias, eps).type_as(x)
 
 
-@torch.compile(**_INDEXER_COMPILE)
+@lazy_torch_compile(**_INDEXER_COMPILE)
 def _fused_indexer_weight_scale(
     weights: torch.Tensor, q_scale: torch.Tensor, scale: float
 ) -> torch.Tensor:
@@ -68,7 +69,7 @@ def _fused_indexer_weight_scale(
     return (weights.unsqueeze(-1) * q_scale * scale).squeeze(-1)
 
 
-@torch.compile(**_INDEXER_COMPILE)
+@lazy_torch_compile(**_INDEXER_COMPILE)
 def _pad_indexer_heads(x: torch.Tensor, pad: int) -> torch.Tensor:
     # DeepGEMM MQA-logits needs num_heads in {32,64}; zero-pad the head dim.
     # Fuse new_zeros + cat (was 2 kernels) into one. Pad values are zero (exact

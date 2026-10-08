@@ -31,6 +31,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import lazy_torch_compile
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -172,7 +173,7 @@ class VocabParallelEmbeddingShardIndices:
         assert self.num_added_elements <= self.num_added_elements_padded
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def get_masked_input_and_mask(
     input_: torch.Tensor,
     org_vocab_start_index: int,

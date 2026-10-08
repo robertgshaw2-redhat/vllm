@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import importlib
 import os
 import socket
 import time
 import warnings
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from copy import copy
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm import TokensPrompt
@@ -23,7 +24,6 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
 from vllm.exceptions import (
     GracefulHTTPError,
     MaxQueuedTokensError,
@@ -35,11 +35,9 @@ from vllm.exceptions import (
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.profiler.wrapper import TorchProfilerWrapper, create_frontend_profiler
-from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
@@ -51,9 +49,8 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import DeferredRenderer, EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
-from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
@@ -66,6 +63,10 @@ from vllm.v1.metrics.loggers import (
 )
 from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
+
+if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalRegistry
+    from vllm.renderers import BaseRenderer
 
 logger = init_logger(__name__)
 
@@ -91,7 +92,7 @@ class AsyncLLM(EngineClient):
         executor_class: type[Executor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        mm_registry: "MultiModalRegistry | None" = None,
         log_requests: bool = True,
         start_engine_loop: bool = True,
         stat_loggers: list[StatLoggerFactory] | None = None,
@@ -100,6 +101,7 @@ class AsyncLLM(EngineClient):
         client_count: int = 1,
         client_index: int = 0,
         profiler: TorchProfilerWrapper | None = None,
+        frontend_preload: Sequence[str] = (),
     ) -> None:
         """Create an AsyncLLM.
 
@@ -122,6 +124,8 @@ class AsyncLLM(EngineClient):
                 PLEASE BE AWARE THAT STAT LOGGER IS NOT STABLE
                 IN V1, AND ITS BASE CLASS INTERFACE MIGHT CHANGE.
             profiler: Torch profiler wrapper used to trace the frontend.
+            frontend_preload: Modules to import while the engine starts, after
+                the renderer is built (e.g. the API server's HTTP app).
 
         Returns:
             None
@@ -156,11 +160,6 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        self.renderer = renderer = renderer_from_config(self.vllm_config)
-
-        # Convert EngineInput --> EngineCoreRequest.
-        self.input_processor = InputProcessor(self.vllm_config, renderer)
-
         self.admission_stats = (
             SharedAdmissionStats(client_addresses, client_count, client_index)
             if client_addresses is not None
@@ -168,20 +167,36 @@ class AsyncLLM(EngineClient):
             else None
         )
 
-        # Converts EngineCoreOutputs --> RequestOutput.
-        self.output_processor = OutputProcessor(
-            renderer.tokenizer,
-            log_stats=self.log_stats,
-            stream_interval=self.vllm_config.scheduler_config.stream_interval,
-            tracing_enabled=tracing_endpoint is not None,
-            admission_stats=self.admission_stats,
-        )
+        def init_frontend() -> "BaseRenderer":
+            # Imported here, off the critical path: these pull in the
+            # multimodal processors and the HF processor stack.
+            from vllm.renderers import renderer_from_config
+            from vllm.v1.engine.input_processor import InputProcessor
+
+            self.renderer = renderer = renderer_from_config(self.vllm_config)
+
+            # Convert EngineInput --> EngineCoreRequest.
+            self.input_processor = InputProcessor(self.vllm_config, renderer)
+
+            # Converts EngineCoreOutputs --> RequestOutput.
+            self.output_processor = OutputProcessor(
+                renderer.tokenizer,
+                log_stats=self.log_stats,
+                stream_interval=self.vllm_config.scheduler_config.stream_interval,
+                tracing_enabled=tracing_endpoint is not None,
+                admission_stats=self.admission_stats,
+            )
+            for module in frontend_preload:
+                importlib.import_module(module)
+            return renderer
 
         # EngineCore (starts the engine in background process).
-        # Hand the renderer to the client so it can start the frontend MM
-        # warmup only after engine-core fork (the why is in
+        # The client calls init_frontend once the engine-core processes have
+        # started, so tokenizer loading overlaps engine startup, and then
+        # starts the frontend MM warmup (the why is in
         # BaseRenderer.start_mm_warmup_in_background). The warmup is joined
         # by reset_mm_cache / warmup / shutdown.
+        frontend = DeferredRenderer(init_frontend)
         self.engine_core = EngineCoreClient.make_async_mp_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -189,8 +204,9 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
-            renderer=renderer,
+            renderer=frontend,
         )
+        frontend.get()  # Already built, unless the client did not build it.
 
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
@@ -251,6 +267,7 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
+        frontend_preload: Sequence[str] = (),
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -265,6 +282,7 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
+            frontend_preload=frontend_preload,
         )
 
     @classmethod
@@ -1229,6 +1247,8 @@ class AsyncLLM(EngineClient):
         )
 
     async def _drain_requests_for_elastic_ep(self, drain_timeout: int) -> None:
+        from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+
         try:
             logger.info(
                 "VLLM_ELASTIC_EP_DRAIN_REQUESTS is set, "
@@ -1249,6 +1269,8 @@ class AsyncLLM(EngineClient):
     async def _scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int
     ) -> None:
+        from vllm.entrypoints.serve.elastic_ep.middleware import set_scaling_elastic_ep
+
         old_data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
         if old_data_parallel_size == new_data_parallel_size:
             logger.info(

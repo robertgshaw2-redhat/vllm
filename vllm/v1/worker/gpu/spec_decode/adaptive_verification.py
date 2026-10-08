@@ -14,7 +14,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import async_tensor_h2d, lazy_torch_compile
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.async_utils import StepTimingSample, stream
@@ -72,7 +72,7 @@ def _assign_draft_token_budget(
     torch.sum(admitted.view_as(survival), dim=1, dtype=capacities.dtype, out=capacities)
 
 
-_assign_draft_token_budget_compiled = torch.compile(
+_assign_draft_token_budget_compiled = lazy_torch_compile(
     _assign_draft_token_budget, dynamic=True
 )
 

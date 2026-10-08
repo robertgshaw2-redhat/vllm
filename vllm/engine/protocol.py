@@ -16,16 +16,16 @@ from vllm.inputs import EngineInput, PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
+    from vllm.renderers import BaseRenderer
     from vllm.v1.engine import PauseMode
+    from vllm.v1.engine.input_processor import InputProcessor
 
 
 @dataclass
@@ -45,8 +45,8 @@ class EngineClient(ABC):
 
     vllm_config: VllmConfig
     model_config: ModelConfig
-    renderer: BaseRenderer
-    input_processor: InputProcessor
+    renderer: "BaseRenderer"
+    input_processor: "InputProcessor"
 
     @property
     @abstractmethod

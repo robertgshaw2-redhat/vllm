@@ -15,6 +15,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import lazy_torch_compile
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
@@ -812,7 +813,7 @@ def _copy_and_expand_dflash_inputs(
     )
 
 
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def update_num_computed_tokens_for_batch_change(
     num_computed_tokens: torch.Tensor,
     num_accepted_tokens: torch.Tensor,

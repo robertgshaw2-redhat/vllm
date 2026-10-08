@@ -7,16 +7,11 @@ from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
-from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
 )
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
@@ -25,6 +20,7 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.reasoning import ReasoningParser
+    from vllm.tokenizers import TokenizerLike
     from vllm.v1.request import Request
 else:
     torch = LazyLoader("torch", globals(), "torch")
@@ -43,6 +39,7 @@ class StructuredOutputManager:
         # depend on per-request chat-template kwargs.
         self.reasoner_cls: type[ReasoningParser] | None = None
         self.vllm_config = vllm_config
+        self._tokenizer_future: Future[TokenizerLike] | None = None
 
         # When in external_launcher mode, async grammar compilation causes deadlocks
         # due to external_launcher mode having a scheduler for each TP rank.
@@ -76,19 +73,28 @@ class StructuredOutputManager:
             # of CPUs.
             max_workers = max(1, (multiprocessing.cpu_count() + 1) // 2)
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            self.tokenizer = cached_tokenizer_from_config(
-                model_config=self.vllm_config.model_config
+            # Imported and loaded off the startup path: the tokenizer is
+            # first needed by a structured output request.
+            from vllm.tokenizers import cached_tokenizer_from_config
+
+            self._tokenizer_future = self.executor.submit(
+                cached_tokenizer_from_config,
+                model_config=self.vllm_config.model_config,
             )
             reasoning_parser_plugin = (
                 self.vllm_config.structured_outputs_config.reasoning_parser_plugin
             )
             if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+                from vllm.reasoning import ReasoningParserManager
+
                 ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
 
             reasoning_parser = (
                 self.vllm_config.structured_outputs_config.reasoning_parser
             )
             if reasoning_parser:
+                from vllm.reasoning import ReasoningParserManager
+
                 self.reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                     reasoning_parser
                 )
@@ -96,6 +102,12 @@ class StructuredOutputManager:
         self.enable_in_reasoning = (
             self.vllm_config.structured_outputs_config.enable_in_reasoning
         )
+
+    @property
+    def tokenizer(self) -> "TokenizerLike":
+        if self._tokenizer_future is None:
+            raise AttributeError("The tokenizer is not initialized.")
+        return self._tokenizer_future.result()
 
     def _get_reasoner(self, request: "Request") -> "ReasoningParser | None":
         structured_req = request.structured_output_request
@@ -132,12 +144,16 @@ class StructuredOutputManager:
             backend = request.sampling_params.structured_outputs._backend
             vocab_size = self.vllm_config.model_config.get_vocab_size()
             if backend == "xgrammar":
+                from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
+
                 self.backend = XgrammarBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
                     vocab_size=vocab_size,
                 )
             elif backend == "guidance":
+                from vllm.v1.structured_output.backend_guidance import GuidanceBackend
+
                 self.backend = GuidanceBackend(
                     self.vllm_config,
                     tokenizer=self.tokenizer,
@@ -256,6 +272,8 @@ class StructuredOutputManager:
         num_spec_tokens = len(spec_tokens)
         if num_spec_tokens <= 0:
             return num_spec_tokens + 1
+
+        from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 
         # Use `find_reasoning_end_offset` to find constraint start if supported
         if (

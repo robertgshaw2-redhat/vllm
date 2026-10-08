@@ -274,6 +274,12 @@ repos:
     language: python
     types: [python]
     additional_dependencies: [regex]
+  - id: check-import-time-compile
+    name: Check for torch.compile at import time
+    entry: python tools/pre_commit/check_import_time_compile.py
+    language: python
+    types: [python]
+    files: ^vllm/
   # prevent use torch.cuda APIs
   - id: check-torch-cuda-call
     name: "Prevent new 'torch.cuda' APIs call"

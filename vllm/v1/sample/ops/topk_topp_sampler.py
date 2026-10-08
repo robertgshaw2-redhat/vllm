@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import lazy_torch_compile
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -449,7 +450,7 @@ class TopKTopPSampler(nn.Module):
 
 # Note: this is a workaround for
 # https://github.com/pytorch/pytorch/pull/151218
-@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
     probs = logits.softmax(dim=-1, dtype=torch.float32)
     q = torch.empty_like(probs)

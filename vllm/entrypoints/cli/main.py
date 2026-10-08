@@ -36,39 +36,51 @@ def maybe_run_omni() -> bool:
     return True
 
 
+# Subcommand -> module that defines it, in `vllm --help` order. Only the
+# invoked subcommand's module is imported: importing all of them costs seconds
+# (e.g. `preload` pulls in the model loader and Inductor).
+_SUBCOMMAND_MODULES = {
+    "chat": "vllm.entrypoints.cli.openai",
+    "complete": "vllm.entrypoints.cli.openai",
+    "serve": "vllm.entrypoints.cli.serve",
+    "launch": "vllm.entrypoints.cli.launch",
+    "bench": "vllm.entrypoints.cli.benchmark.main",
+    "collect-env": "vllm.entrypoints.cli.collect_env",
+    "preload": "vllm.entrypoints.cli.preload",
+    "run-batch": "vllm.entrypoints.cli.run_batch",
+    "snapshot": "vllm.entrypoints.cli.snapshot",
+}
+
+
 def main():
     if maybe_run_omni():
         return
 
-    import vllm.entrypoints.cli.benchmark.main
-    import vllm.entrypoints.cli.collect_env
-    import vllm.entrypoints.cli.launch
-    import vllm.entrypoints.cli.openai
-    import vllm.entrypoints.cli.preload
-    import vllm.entrypoints.cli.run_batch
-    import vllm.entrypoints.cli.serve
-    import vllm.entrypoints.cli.snapshot
-    from vllm.entrypoints.serve.utils.api_utils import (
-        VLLM_SUBCMD_PARSER_EPILOG,
-        cli_env_setup,
-    )
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from importlib import import_module
 
-    CMD_MODULES = [
-        vllm.entrypoints.cli.openai,
-        vllm.entrypoints.cli.serve,
-        vllm.entrypoints.cli.launch,
-        vllm.entrypoints.cli.benchmark.main,
-        vllm.entrypoints.cli.collect_env,
-        vllm.entrypoints.cli.preload,
-        vllm.entrypoints.cli.run_batch,
-        vllm.entrypoints.cli.snapshot,
-    ]
+    from vllm.utils.gc_utils import gc_paused_for_imports
+
+    subcommand = sys.argv[1] if len(sys.argv) > 1 else None
+    with gc_paused_for_imports():
+        from vllm.entrypoints.serve.utils.cli_utils import (
+            VLLM_SUBCMD_PARSER_EPILOG,
+            cli_env_setup,
+        )
+        from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+        if subcommand in _SUBCOMMAND_MODULES:
+            module_names = [_SUBCOMMAND_MODULES[subcommand]]
+        else:
+            module_names = list(dict.fromkeys(_SUBCOMMAND_MODULES.values()))
+        CMD_MODULES = [import_module(name) for name in module_names]
 
     if sys.argv[1:2] != ["snapshot"]:
         cli_env_setup()
 
-    vllm.entrypoints.cli.benchmark.main.maybe_exec_rust_bench()
+    if subcommand == "bench":
+        import vllm.entrypoints.cli.benchmark.main
+
+        vllm.entrypoints.cli.benchmark.main.maybe_exec_rust_bench()
 
     # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
     if len(sys.argv) > 1 and sys.argv[1] == "bench":
@@ -99,7 +111,7 @@ def main():
     subparsers = parser.add_subparsers(required=False, dest="subparser")
     cmds = {}
     for cmd_module in CMD_MODULES:
-        if cmd_module is vllm.entrypoints.cli.snapshot:
+        if cmd_module.__name__ == "vllm.entrypoints.cli.snapshot":
             new_cmds = cmd_module.cmd_init(
                 create_requested=sys.argv[1:3] == ["snapshot", "create"]
             )
