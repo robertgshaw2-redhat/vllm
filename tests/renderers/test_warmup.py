@@ -372,7 +372,9 @@ class TestEngineStartWarmupHook:
         from vllm.v1.engine import core_client as cc
 
         callback = MagicMock()
-        with patch.object(cc, "EngineCore") as mock_engine_core:
+        # Imported by InprocClient.__init__, to keep EngineCore's imports out
+        # of the API server.
+        with patch("vllm.v1.engine.core.EngineCore") as mock_engine_core:
             cc.InprocClient(
                 MagicMock(),
                 MagicMock(),
@@ -483,4 +485,18 @@ class TestEngineStartWarmupHook:
         client2 = cc.MPClient.__new__(cc.MPClient)
         client2._renderer = renderer
         client2._start_mm_warmup()
+        renderer.start_mm_warmup_in_background.assert_called_once()
+
+    def test_mp_client_builds_deferred_renderer_after_launch(self):
+        # A deferred renderer is built on a background thread once the
+        # engine-core processes have started, then warmed up like a given one.
+        from vllm.v1.engine import core_client as cc
+
+        renderer = self._mock_renderer()
+        client = cc.MPClient.__new__(cc.MPClient)
+        client._renderer = cc.DeferredRenderer(lambda: renderer)
+        client._frontend_init = None
+        client._start_mm_warmup()
+        client._join_frontend_init()
+        assert client._renderer is renderer
         renderer.start_mm_warmup_in_background.assert_called_once()

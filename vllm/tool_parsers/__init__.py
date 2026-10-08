@@ -1,12 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.tool_parsers.abstract_tool_parser import (
-    ToolParser,
-    ToolParserManager,
-)
+from typing import TYPE_CHECKING, Any
+
+from vllm.tool_parsers.manager import ToolParserManager
+
+if TYPE_CHECKING:
+    from vllm.tool_parsers.abstract_tool_parser import ToolParser
 
 __all__ = ["ToolParser", "ToolParserManager"]
+
+
+def __getattr__(name: str) -> Any:
+    # Imported on first access: ToolParser pulls in the OpenAI protocol models.
+    if name == "ToolParser":
+        from vllm.tool_parsers.abstract_tool_parser import ToolParser
+
+        return ToolParser
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 """

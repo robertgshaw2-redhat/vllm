@@ -5,9 +5,10 @@
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import lazy_torch_compile
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(backend=current_platform.simple_compile_backend)
 def batched_count_greater_than(x: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
     """Counts elements in each row of x that are greater than the corresponding
     value in values.  Use torch.compile to generate an optimized kernel for

@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import lazy_torch_compile
 
 from .commandr import LayerNorm
 from .interfaces import EagleModelMixin, SupportsEagle3, SupportsPP, SupportsQuant
@@ -55,7 +56,7 @@ def is_prefix_dense_layer(config: CohereConfig, layer_idx: int) -> bool:
     return all(t == "dense" for t in config.mlp_layer_types[: layer_idx + 1])
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(backend=current_platform.simple_compile_backend)
 def token_choice_with_bias(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -74,7 +75,7 @@ def token_choice_with_bias(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
+@lazy_torch_compile(backend=current_platform.simple_compile_backend)
 def rms_norm_func(hidden_states, weight, variance_epsilon):
     input_dtype = hidden_states.dtype
     hidden_states = hidden_states.to(torch.float32)

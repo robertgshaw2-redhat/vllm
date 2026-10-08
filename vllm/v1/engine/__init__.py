@@ -35,6 +35,9 @@ PauseMode = Literal["abort", "wait", "keep"]
 # so form part of the external API.
 FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 
+# Sent by an EngineCore process to its clients when it dies.
+ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+
 EEP_NOTIFICATION_CALL_ID = -1
 
 FT_STATUS_CALL_ID = -2

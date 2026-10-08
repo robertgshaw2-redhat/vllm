@@ -16,9 +16,8 @@ from vllm.entrypoints.launchers.cli_args import (
     propagate_flash_late_interaction,
     validate_parsed_serve_args,
 )
-from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
-from vllm.entrypoints.launchers.launcher import create_server_socket
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.launchers.server_setup import create_server_socket
+from vllm.entrypoints.serve.utils.cli_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.usage.usage_lib import UsageContext
@@ -26,7 +25,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import (
     APIServerProcessManager,
@@ -145,6 +143,8 @@ class ServeSubcommand(CLISubcommand):
             args.api_server_count = 1
 
         if is_multi_port:
+            from vllm.entrypoints.launchers.dp_supervisor import run_dp_supervisor
+
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
@@ -227,6 +227,8 @@ def run_headless(args: argparse.Namespace):
             VLLM_VERSION,
             head_node_address,
         )
+
+        from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
         executor = MultiprocExecutor(vllm_config, monitor_workers=False)
         executor.start_worker_monitor(inline=True)

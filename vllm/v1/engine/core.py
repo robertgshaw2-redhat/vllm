@@ -61,6 +61,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
+    ENGINE_CORE_DEAD,
     EEPNotificationType,
     EngineCoreOutput,
     EngineCoreOutputs,
@@ -1099,7 +1100,7 @@ class EngineShutdownState(IntEnum):
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
-    ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
+    ENGINE_CORE_DEAD = ENGINE_CORE_DEAD
     addresses: EngineZmqAddresses
 
     @instrument(span_name="EngineCoreProc init")

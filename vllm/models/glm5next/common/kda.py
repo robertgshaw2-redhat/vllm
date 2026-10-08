@@ -45,6 +45,7 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.utils.torch_utils import lazy_torch_compile
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -124,7 +125,7 @@ class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
                 param.tp_rank = param_tp_rank
 
 
-@torch.compile(
+@lazy_torch_compile(
     dynamic=True,
     backend=current_platform.simple_compile_backend,
     options=maybe_disable_graph_partition(current_platform.simple_compile_backend),

@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import subprocess
+import sys
+import textwrap
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1433,3 +1436,24 @@ def test_combo_kernel_defaults_without_inductor_deterministic_setting():
 
     assert config.inductor_compile_config["combo_kernels"] is True
     assert config.inductor_compile_config["benchmark_combo_kernel"] is True
+
+
+def test_combo_kernel_defaults_do_not_import_inductor():
+    # `vllm serve` builds this config to make its argument parser, before it
+    # starts the engine. A fresh interpreter, as this one imported Inductor.
+    code = textwrap.dedent(
+        """
+        import sys
+        from unittest.mock import patch
+
+        from vllm.config import CompilationConfig
+
+        with patch(
+            "vllm.config.compilation.current_platform.is_cpu", return_value=False
+        ):
+            config = CompilationConfig()
+        assert config.inductor_compile_config["combo_kernels"] is True
+        assert "torch._inductor" not in sys.modules
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
