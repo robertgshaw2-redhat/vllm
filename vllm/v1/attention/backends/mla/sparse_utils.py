@@ -32,10 +32,11 @@ _PREFILL_WORKSPACE_BUDGET_ROWS = 5 * 163840
 def get_prefill_workspace_size(max_model_len: int) -> int:
     """Rows in the sparse MLA prefill workspace.
 
-    A fixed batching budget, floored at max_model_len since chunking cannot
-    split one request's context.
+    Up to five full contexts per chunk, capped at a fixed budget for long
+    contexts but never below max_model_len, since chunking cannot split one
+    request's context.
     """
-    return max(max_model_len, _PREFILL_WORKSPACE_BUDGET_ROWS)
+    return min(5 * max_model_len, max(max_model_len, _PREFILL_WORKSPACE_BUDGET_ROWS))
 
 
 def get_prefill_workspace_shard_rows(

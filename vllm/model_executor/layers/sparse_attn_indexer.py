@@ -525,6 +525,10 @@ def sparse_attn_indexer(
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
             assert chunk.local_cu_seq_lens is not None
+            assert chunk.max_local_total_seq_lens <= local_seq_lens, (
+                f"indexer prefill chunk needs {chunk.max_local_total_seq_lens} "
+                f"K rows, workspace has {local_seq_lens}"
+            )
             k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
             k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
             if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
