@@ -37,6 +37,8 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
+    get_prefill_workspace_shard_rows,
+    get_prefill_workspace_size,
     request_row_bounds,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
@@ -306,16 +308,6 @@ class FlashMLASparseMetadata(SparseMLACommonMetadata):
     fp8_use_mixed_batch: bool = False
 
 
-def get_prefill_workspace_size(max_model_len: int):
-    # NOTE(Lucas): 5 is a magic number for controlling the prefill buffer size.
-    # May be tuned later.
-    # Memory usage: 5 * max_model_len * 576 * 2 bytes
-    #   Example: DeepSeek-V3.2 with max_model_len=163840 ->
-    #            5 * 163840 * 576 * 2 = ~900 MB
-    # This fits nicely below the typical MoE workspace size of >2GB so this is "free"
-    return max_model_len * 5
-
-
 class FlashMLASparseMetadataBuilder(
     SparseMLACommonMetadataBuilder[FlashMLASparseMetadata]
 ):
@@ -562,7 +554,11 @@ class FlashMLASparseMetadataBuilder(
                     row_req_idx[num_decodes:], shard_rows_cpu[num_decodes:].numpy()
                 )
                 workspace_rows = torch.from_numpy(rows_per_rank.astype(np.int32))
-                max_prefill_buffer_size //= self.dcp_world_size
+                max_prefill_buffer_size = get_prefill_workspace_shard_rows(
+                    max_prefill_buffer_size,
+                    self.dcp_world_size,
+                    self.cp_kv_cache_interleave_size,
+                )
                 entry_rows = async_tensor_h2d(row_bounds[:-1], device=self.device)
                 prefill_block_table = prefill_block_table.index_select(0, entry_rows)
                 prefill_seq_lens = prefill_seq_lens.index_select(0, entry_rows)
@@ -788,12 +784,19 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             if self.pcp_dcp_kv_gather:
                 # PCP+DCP upconverts this rank's KV shard, then all-gathers the
                 # shards into a workspace of the full prefill size.
-                shard_rows //= parallel_config.decode_context_parallel_size
+                shard_rows = get_prefill_workspace_shard_rows(
+                    prefill_workspace_size,
+                    parallel_config.decode_context_parallel_size,
+                    parallel_config.cp_kv_cache_interleave_size,
+                )
             self.prefill_workspace_shape = (shard_rows, self.q_head_size)
             self.workspace_specs.append((self.prefill_workspace_shape, torch.bfloat16))
             if self.pcp_dcp_kv_gather:
+                gathered_rows = (
+                    parallel_config.decode_context_parallel_size * shard_rows
+                )
                 self.workspace_specs.append(
-                    ((prefill_workspace_size, self.q_head_size), torch.bfloat16)
+                    ((gathered_rows, self.q_head_size), torch.bfloat16)
                 )
             prefill_query_heads = num_heads
             if self.pcp_dcp_kv_gather and self.dcp_world_size > self.pcp_world_size:

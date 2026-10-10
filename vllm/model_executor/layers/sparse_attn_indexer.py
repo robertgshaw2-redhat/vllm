@@ -35,6 +35,7 @@ from vllm.utils.deep_gemm import (
     has_deep_gemm,
 )
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -362,17 +363,22 @@ def sparse_attn_indexer(
         assert candidate_block_size > 0
 
     # assert isinstance(attn_metadata, dict)
+    pcp_dcp_kv_gather = use_pcp and dcp_world_size > 1
+    # Under PCP+DCP the local buffer holds only this rank's KV shard.
+    local_seq_lens = (
+        cdiv(total_seq_lens, dcp_world_size) if pcp_dcp_kv_gather else total_seq_lens
+    )
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
         values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            local_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
         profile_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             values_spec,
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         ]
-        if use_pcp and dcp_world_size > 1:
+        if pcp_dcp_kv_gather:
             # The PCP+DCP path takes an all-gather destination and a
             # de-interleaved result.
             gather_spec = _gather_workspace_shapes(
@@ -491,7 +497,7 @@ def sparse_attn_indexer(
         # scales) based on use_fp4_cache.
         workspace_manager = current_workspace_manager()
         values_spec, scales_spec = _gather_workspace_shapes(
-            total_seq_lens, head_dim, fp8_dtype, use_fp4_cache
+            local_seq_lens, head_dim, fp8_dtype, use_fp4_cache
         )
         # PCP + DCP needs two more pairs: the rank-major all-gather destination
         # and the de-interleaved result.

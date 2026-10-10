@@ -24,6 +24,26 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.block_table import get_block_table_width
 
+# Rows of bf16 [576] KV the FlashMLA sparse prefill workspace batches per chunk
+# (~900 MiB). DeepSeek-V3.2's max_model_len is 163840.
+_PREFILL_WORKSPACE_BUDGET_ROWS = 5 * 163840
+
+
+def get_prefill_workspace_size(max_model_len: int) -> int:
+    """Rows in the sparse MLA prefill workspace.
+
+    A fixed batching budget, floored at max_model_len since chunking cannot
+    split one request's context.
+    """
+    return max(max_model_len, _PREFILL_WORKSPACE_BUDGET_ROWS)
+
+
+def get_prefill_workspace_shard_rows(
+    workspace_size: int, dcp_world_size: int, interleave: int
+) -> int:
+    """Largest DCP shard of a context that fits ``workspace_size`` rows."""
+    return cdiv(workspace_size, dcp_world_size * interleave) * interleave
+
 
 def request_row_bounds(req_idx: np.ndarray) -> np.ndarray:
     """Bounds of the runs of adjacent rows that belong to one request: run

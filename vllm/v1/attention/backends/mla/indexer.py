@@ -36,7 +36,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.mla.sparse_utils import request_row_bounds
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    get_prefill_workspace_size,
+    request_row_bounds,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -837,16 +840,9 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
-    max_model_len = vllm_config.model_config.max_model_len
-    # NOTE(Chen): 40 is a magic number for controlling the prefill buffer size.
-    # Each entry is 128 fp8 bytes and 4 scale bytes for a total of 132 bytes.
-    # The flashmla_sparse backend uses a workspace size of 5 * max_model_len.
-    # The memory usage of the workspace there is 576 * 2 bytes; so we size this as
-    # (576 * 2 // 132) * 5 = 40 to maximize this workspace size while still fitting
-    # within the flashmla_sparse workspace.
-    # For DeepSeek-V3.2, the max_model_len is 163840.
-    #   40 * 163840 * 132 = 865075200 bytes = 825 MB
-    return max_model_len * 40
+    # An indexer K row is 132 bytes (128 fp8 + 4 scale), a FlashMLA sparse
+    # workspace row 576 * 2 bytes, so 8 indexer rows fit in one of its rows.
+    return 8 * get_prefill_workspace_size(vllm_config.model_config.max_model_len)
 
 
 def _supports_varlen_paged_mqa_logits() -> bool:
