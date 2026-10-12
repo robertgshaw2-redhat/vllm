@@ -4,17 +4,21 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
+from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Any, NamedTuple
+from unittest.mock import patch
 
 import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
+from vllm.distributed.device_communicators.shm_broadcast import memory_fence
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.stats import (
     HiSparseKVConnectorStats,
 )
@@ -22,6 +26,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tp_group,
 )
+from vllm.logger import init_logger
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
@@ -39,6 +44,8 @@ if TYPE_CHECKING:
         HiSparseConnectorMetadata,
     )
     from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+
+logger = init_logger(__name__)
 
 
 class _DMADescriptors(NamedTuple):
@@ -73,6 +80,8 @@ def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
 
 
 _METRICS_INTERVAL = 2000
+_SHARED_HOST_WRITE_EVENT_SLOTS = 4
+_HOST_WRITE_WAIT_LOG_INTERVAL_S = 60.0
 
 
 def _get_hisparse_cache(
@@ -154,32 +163,148 @@ def _is_hisparse_host_writer(
     return shared_host_region is None or get_tensor_model_parallel_rank() == 0
 
 
-def _create_hisparse_host_events(
+class _HostWriteFence:
+    """Hand out per-step host-write events and order waits on them.
+
+    A stream wait on a CUDA IPC event waits on the event's most recent record
+    at the time the wait is issued, whichever process recorded it. With a
+    shared host pool, TP rank 0 records and the other ranks wait. A reader one
+    step behind the writer would wait on a record that depends on the reader's
+    own later collectives, hanging the TP group with no error; a reader ahead
+    of the writer would wait on a stale record. Step counters in shared memory
+    pin each wait to the intended step's record and keep the writer from
+    re-recording a slot before every reader has waited on it.
+    """
+
+    def __init__(
+        self,
+        events: Sequence[torch.Event],
+        is_writer: bool,
+        control_shm: shared_memory.SharedMemory | None = None,
+        tp_rank: int = 0,
+        tp_size: int = 1,
+    ) -> None:
+        self._events = tuple(events)
+        self._is_writer = is_writer
+        self._tp_rank = tp_rank
+        self._step = 0
+        self._control_shm = control_shm
+        # [0]: last step the writer finished recording.
+        # [r]: last step reader rank r has waited on.
+        self._control: np.ndarray | None = None
+        if control_shm is not None:
+            self._control = np.ndarray(
+                (tp_size,), dtype=np.int64, buffer=control_shm.buf
+            )
+
+    @property
+    def current_event(self) -> torch.Event:
+        return self._events[self._step % len(self._events)]
+
+    def advance(self, stream: torch.Stream) -> tuple[torch.Event, torch.Event]:
+        """Make `stream` wait on the finished step's host writes.
+
+        Returns the finished step's event and the new step's event.
+        """
+        previous_step = self._step
+        previous_event = self.current_event
+        self._step += 1
+        control = self._control
+        if control is not None:
+            if self._is_writer:
+                memory_fence()
+                control[0] = previous_step
+                oldest_step = self._step - len(self._events)
+                self._wait_until(
+                    lambda: int(control[1:].min()) >= oldest_step,
+                    "TP readers to wait on host-write events",
+                )
+            else:
+                self._wait_until(
+                    lambda: int(control[0]) >= previous_step,
+                    "TP rank 0 to record host writes",
+                )
+        stream.wait_event(previous_event)
+        if control is not None and not self._is_writer:
+            memory_fence()
+            control[self._tp_rank] = previous_step
+        return previous_event, self.current_event
+
+    def _wait_until(self, ready: Callable[[], bool], waiting_for: str) -> None:
+        if not ready():
+            start = time.monotonic()
+            next_log = start + _HOST_WRITE_WAIT_LOG_INTERVAL_S
+            while not ready():
+                time.sleep(0)
+                if (now := time.monotonic()) >= next_log:
+                    logger.warning(
+                        "HiSparse TP rank %d has waited %.0fs at step %d for %s.",
+                        self._tp_rank,
+                        now - start,
+                        self._step,
+                        waiting_for,
+                    )
+                    next_log += _HOST_WRITE_WAIT_LOG_INTERVAL_S
+        memory_fence()
+
+    def close(self) -> None:
+        self._control = None
+        if self._control_shm is not None:
+            self._control_shm.close()
+            self._control_shm = None
+
+
+def _create_host_write_control(tp_size: int) -> shared_memory.SharedMemory:
+    control_shm = shared_memory.SharedMemory(
+        create=True, size=tp_size * np.dtype(np.int64).itemsize
+    )
+    # No step recorded or waited on yet.
+    np.frombuffer(control_shm.buf, dtype=np.int64).fill(-1)
+    return control_shm
+
+
+def _create_host_write_fence(
     shared_host_region: SharedOffloadRegion | None,
     is_host_writer: bool,
     device: torch.device,
-) -> tuple[torch.Event, torch.Event]:
+) -> _HostWriteFence:
     if shared_host_region is None:
-        return torch.Event(), torch.Event()
+        return _HostWriteFence((torch.Event(), torch.Event()), is_writer=True)
 
-    events: tuple[torch.Event, torch.Event] | None = None
-    ipc_handles = None
+    tp_group = get_tp_group()
+    events: tuple[torch.Event, ...] | None = None
+    control_shm: shared_memory.SharedMemory | None = None
+    payload = None
     if is_host_writer:
-        events = (
-            torch.cuda.Event(interprocess=True),
-            torch.cuda.Event(interprocess=True),
+        events = tuple(
+            torch.cuda.Event(interprocess=True)
+            for _ in range(_SHARED_HOST_WRITE_EVENT_SLOTS)
         )
         stream = current_stream()
         for event in events:
             event.record(stream)
-        ipc_handles = tuple(event.ipc_handle() for event in events)
-    ipc_handles = get_tp_group().broadcast_object(ipc_handles, src=0)
+        control_shm = _create_host_write_control(tp_group.world_size)
+        payload = (tuple(event.ipc_handle() for event in events), control_shm.name)
+    ipc_handles, control_name = tp_group.broadcast_object(payload, src=0)
     if events is None:
-        events = (
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[0]),
-            torch.cuda.Event.from_ipc_handle(device, ipc_handles[1]),
+        events = tuple(
+            torch.cuda.Event.from_ipc_handle(device, handle) for handle in ipc_handles
         )
-    return events
+        # Only the creator should track (and unlink) the segment.
+        with patch("multiprocessing.resource_tracker.register", lambda *_: None):
+            control_shm = shared_memory.SharedMemory(name=control_name)
+    tp_group.barrier()
+    assert control_shm is not None
+    if is_host_writer:
+        # Every rank has mapped it; drop the name so no exit path leaks it.
+        control_shm.unlink()
+    return _HostWriteFence(
+        events,
+        is_host_writer,
+        control_shm,
+        tp_rank=tp_group.rank_in_group,
+        tp_size=tp_group.world_size,
+    )
 
 
 class HiSparseConnectorWorker:
@@ -312,11 +437,10 @@ class HiSparseConnectorWorker:
             for layer_name, cache in zip(cache_layer_names, cache_handles, strict=True)
             if cache.runtime.is_group_leader
         )
-        self.host_write_events = _create_hisparse_host_events(
+        self._host_write_fence = _create_host_write_fence(
             shared_host_region, is_host_writer, device
         )
-        self.host_write_event = self.host_write_events[1]
-        self._next_host_write_event = 0
+        self.host_write_event = self._host_write_fence.current_event
         self.cache_handles = cache_handles
         self.leader_runtimes = [cache.runtime for _, cache in self._group_leaders]
         request_state_indices = {
@@ -404,10 +528,9 @@ class HiSparseConnectorWorker:
     ) -> None:
         self._stage_row_mirror_mapping(num_tokens)
         self._finish_previous_step()
-        previous_host_write_event = self.host_write_event
-        self.host_write_event = self.host_write_events[self._next_host_write_event]
-        self._next_host_write_event ^= 1
-        current_stream().wait_event(previous_host_write_event)
+        previous_host_write_event, self.host_write_event = (
+            self._host_write_fence.advance(current_stream())
+        )
         self._release_completed_dma_descriptors()
         self._dma_submitted = False
         mirrors = _flatten_row_mirrors(metadata.row_mirrors, request_ids)
@@ -946,6 +1069,7 @@ class HiSparseConnectorWorker:
             self._slot_mapping_staging.stream.synchronize()
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
+        self._host_write_fence.close()
         release_pinned_state(
             [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,

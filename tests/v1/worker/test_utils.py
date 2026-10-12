@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mmap
+import threading
+import time
 from collections import deque
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -20,7 +22,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     HiSparseConnectorWorker,
+    _create_host_write_control,
     _flatten_row_mirrors,
+    _HostWriteFence,
     _select_written_row_mirrors,
     _SlotMappingStaging,
 )
@@ -48,9 +52,8 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._draft_mirror_pending = False
     worker._pending_dma_descriptors = deque()
     worker._dma_free_descriptors = []
-    worker.host_write_events = (MagicMock(), MagicMock())
-    worker.host_write_event = worker.host_write_events[1]
-    worker._next_host_write_event = 0
+    worker._host_write_fence = _HostWriteFence((MagicMock(), MagicMock()), True)
+    worker.host_write_event = worker._host_write_fence.current_event
     worker.dma_stream = None
     worker.shared_host_region = None
     worker._completed_host_copy_dst_ids = []
@@ -997,9 +1000,8 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     worker.is_host_writer = is_host_writer
     worker.hot_backing = SimpleNamespace(device=torch.device("cuda:1"))
     host_write_events = (MagicMock(), MagicMock())
-    worker.host_write_events = host_write_events
-    worker.host_write_event = host_write_events[1]
-    worker._next_host_write_event = 0
+    worker._host_write_fence = _HostWriteFence(host_write_events, True)
+    worker.host_write_event = host_write_events[0]
     worker.host_caches = ()
     worker.host_num_blocks = 1
     worker._post_forward_transfers = []
@@ -1044,10 +1046,68 @@ def test_hisparse_step_waits_for_previous_host_write(monkeypatch, is_host_writer
     )
 
     assert stream.wait_event.call_args_list == [
-        call(host_write_events[1]),
         call(host_write_events[0]),
+        call(host_write_events[1]),
     ]
-    assert worker.host_write_event is host_write_events[1]
+    assert worker.host_write_event is host_write_events[0]
+
+
+class _IpcEvent:
+    """A CUDA IPC event: a stream wait binds to its latest record."""
+
+    def __init__(self) -> None:
+        self.recorded_step = 0
+
+
+class _BindingStream:
+    def __init__(self) -> None:
+        self.waited_steps: list[int] = []
+
+    def wait_event(self, event: _IpcEvent) -> None:
+        self.waited_steps.append(event.recorded_step)
+
+
+@pytest.mark.parametrize("lagging", ["reader", "writer"])
+def test_hisparse_host_write_fence_binds_waits_to_previous_step(lagging):
+    """Each TP reader step must wait on the writer's previous-step record.
+
+    Binding to a newer record makes the reader's GPU wait on writer work that
+    needs the reader's own later collectives, a silent TP hang; binding to an
+    older one skips the ordering on host writes.
+    """
+    num_steps = 12
+    events = tuple(_IpcEvent() for _ in range(4))
+    writer_shm = _create_host_write_control(2)
+    reader_shm = hisparse_worker_module.shared_memory.SharedMemory(name=writer_shm.name)
+    writer = _HostWriteFence(events, True, writer_shm, tp_rank=0, tp_size=2)
+    reader = _HostWriteFence(events, False, reader_shm, tp_rank=1, tp_size=2)
+    writer_stream, reader_stream = _BindingStream(), _BindingStream()
+
+    def run_writer() -> None:
+        if lagging == "writer":
+            time.sleep(0.1)
+        for step in range(1, num_steps + 1):
+            _, event = writer.advance(writer_stream)
+            event.recorded_step = step
+
+    def run_reader() -> None:
+        if lagging == "reader":
+            time.sleep(0.1)
+        for _ in range(num_steps):
+            reader.advance(reader_stream)
+
+    threads = [threading.Thread(target=run_writer), threading.Thread(target=run_reader)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    writer.close()
+    reader.close()
+    writer_shm.unlink()
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert reader_stream.waited_steps == list(range(num_steps))
+    assert writer_stream.waited_steps == list(range(num_steps))
 
 
 @pytest.mark.parametrize("tp_rank, expected_copies", [(0, 1), (1, 0)])
@@ -1215,6 +1275,7 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.cache_handles = []
     worker.pinned_host_pools = []
     worker.shared_host_region = object()
+    worker._host_write_fence = MagicMock()
     released = False
 
     def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
@@ -1231,6 +1292,7 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
+    worker._host_write_fence.close.assert_called_once_with()
 
 
 class _TestReplaySSMMixer(MambaMixer2):
